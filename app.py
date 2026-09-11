@@ -27,44 +27,37 @@ MODEL_LABELS = {
 
 
 def initialize_state() -> None:
-    """Create session state values used by the application."""
+    """Create the state used across Streamlit reruns."""
     defaults: dict[str, Any] = {
         "chat_history": [],
         "context": None,
         "reference_code": "",
+        "latest_task": "",
         "last_generated_code": {"aya_expanse": None, "llama_scout": None},
         "evaluation_results": {"aya_expanse": None, "llama_scout": None},
     }
-
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-def clean_generated_code(text: str) -> str:
-    """Remove common Markdown code fences from a model response."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    return cleaned
+def display_generated_output(text: str) -> None:
+    """Render model output as text because it may contain multiple files."""
+    st.code(text, language="text")
 
 
-async def _consume_stream(stream: Any, placeholder: Any) -> str:
-    """Consume one model stream and update its UI placeholder."""
-    response = ""
+async def consume_stream(stream: Any, placeholder: Any) -> str:
+    """Consume a model stream while updating the UI."""
+    output = ""
     async for chunk in stream:
-        response += chunk
-        placeholder.code(clean_generated_code(response), language="python")
-    return clean_generated_code(response)
+        output += chunk
+        display_text = output.strip()
+        placeholder.code(display_text, language="text")
+    return output.strip()
 
 
 async def generate_code(task: str) -> tuple[str, str]:
-    """Generate code concurrently with both benchmark models."""
+    """Generate the same task concurrently with both benchmark models."""
     llama_stream, aya_stream = await get_parallel_responses(
         task,
         st.session_state.context,
@@ -78,15 +71,15 @@ async def generate_code(task: str) -> tuple[str, str]:
         st.subheader(MODEL_LABELS["llama_scout"])
         llama_placeholder = st.empty()
 
-    llama_code, aya_code = await asyncio.gather(
-        _consume_stream(llama_stream, llama_placeholder),
-        _consume_stream(aya_stream, aya_placeholder),
+    llama_output, aya_output = await asyncio.gather(
+        consume_stream(llama_stream, llama_placeholder),
+        consume_stream(aya_stream, aya_placeholder),
     )
-    return aya_code, llama_code
+    return aya_output, llama_output
 
 
-def show_generated_results() -> None:
-    """Render previous model outputs from the current session."""
+def show_generated_history() -> None:
+    """Render completed generations from the current session."""
     for message in st.session_state.chat_history:
         if message["role"] == "user":
             with st.chat_message("user"):
@@ -97,30 +90,33 @@ def show_generated_results() -> None:
             aya_column, llama_column = st.columns(2)
             with aya_column:
                 st.subheader(MODEL_LABELS["aya_expanse"])
-                st.code(message["aya_response"], language="python")
+                display_generated_output(message["aya_response"])
             with llama_column:
                 st.subheader(MODEL_LABELS["llama_scout"])
-                st.code(message["llama_response"], language="python")
+                display_generated_output(message["llama_response"])
 
 
-def evaluate_generated_code(task: str) -> None:
-    """Evaluate the latest output from both models."""
+def evaluate_latest() -> None:
+    """Evaluate the latest pair of generated outputs."""
     outputs = st.session_state.last_generated_code
     if not outputs["aya_expanse"] or not outputs["llama_scout"]:
-        st.error("Generate code with both models before running an evaluation.")
+        st.error("Generate code with both models before evaluating it.")
+        return
+    if not st.session_state.latest_task:
+        st.error("The latest coding task is missing.")
         return
 
-    with st.spinner("Evaluating both implementations..."):
+    with st.spinner("Running validation and DeepEval..."):
         for model_name, code in outputs.items():
             st.session_state.evaluation_results[model_name] = evaluate_code(
                 generated_code=code,
-                task=task,
+                task=st.session_state.latest_task,
                 reference_code=st.session_state.reference_code or None,
             )
 
 
-def build_results_dataframe() -> pd.DataFrame:
-    """Create a compact table for side-by-side model comparison."""
+def build_score_dataframe() -> pd.DataFrame:
+    """Build the user-facing 0–10 comparison table."""
     rows = []
     for metric_name in ("correctness", "readability", "best_practices"):
         rows.append(
@@ -128,10 +124,10 @@ def build_results_dataframe() -> pd.DataFrame:
                 "Metric": metric_name.replace("_", " ").title(),
                 "Aya Expanse": st.session_state.evaluation_results["aya_expanse"][
                     "detailed_metrics"
-                ][metric_name]["score"],
+                ][metric_name]["score_10"],
                 "Llama 4 Scout": st.session_state.evaluation_results["llama_scout"][
                     "detailed_metrics"
-                ][metric_name]["score"],
+                ][metric_name]["score_10"],
             }
         )
 
@@ -139,31 +135,61 @@ def build_results_dataframe() -> pd.DataFrame:
         {
             "Metric": "Overall Score",
             "Aya Expanse": st.session_state.evaluation_results["aya_expanse"][
-                "overall_score"
+                "overall_score_10"
             ],
             "Llama 4 Scout": st.session_state.evaluation_results["llama_scout"][
-                "overall_score"
+                "overall_score_10"
             ],
         }
     )
     return pd.DataFrame(rows)
 
 
+def show_validation(result: dict[str, Any]) -> None:
+    """Show deterministic evidence separately from the LLM-judge score."""
+    validation = result.get("validation", {})
+    if not validation:
+        return
+
+    syntax = validation.get("syntax", {})
+    security = validation.get("security", {})
+
+    st.markdown("**Deterministic checks**")
+    st.write(
+        {
+            "Files detected": validation.get("file_count", 1),
+            "Lines": validation.get("line_count", 0),
+            "Syntax": syntax.get("passed"),
+            "Security scan": security.get("passed"),
+            "Execution verified": validation.get("execution_verified", False),
+            "Tests executed": validation.get("tests_executed", False),
+            "Evidence level": validation.get("evidence_level", "low"),
+        }
+    )
+
+    if security.get("message"):
+        st.caption(security["message"])
+    if syntax.get("message") and syntax.get("passed") is not None:
+        st.caption(syntax["message"])
+
+
 def show_evaluation_results() -> None:
-    """Render scores and evaluator reasoning."""
+    """Render model scores, evidence, and evaluator reasoning."""
     results = st.session_state.evaluation_results
     if not results["aya_expanse"] or not results["llama_scout"]:
         return
 
     st.divider()
     st.header("Evaluation Results")
-    st.caption("Scores are produced by an LLM-as-a-judge evaluation using DeepEval.")
+    st.caption(
+        "DeepEval scores are normalized from 0–1 internally and shown here on a 0–10 scale."
+    )
 
     if results["aya_expanse"].get("error") or results["llama_scout"].get("error"):
-        st.error("One or more evaluations failed. See the details below.")
+        st.error("One or more evaluations failed. Check the model details below.")
         return
 
-    result_df = build_results_dataframe()
+    result_df = build_score_dataframe()
     chart_df = result_df.melt(id_vars="Metric", var_name="Model", value_name="Score")
 
     fig = px.bar(
@@ -179,33 +205,30 @@ def show_evaluation_results() -> None:
     fig.update_layout(height=450)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(
-        result_df.style.format(
-            {"Aya Expanse": "{:.2f}", "Llama 4 Scout": "{:.2f}"}
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
+    st.dataframe(result_df, hide_index=True, use_container_width=True)
 
     for model_name, result in results.items():
-        st.subheader(f"{MODEL_LABELS[model_name]} — evaluator reasoning")
+        st.subheader(MODEL_LABELS[model_name])
+        show_validation(result)
+
         details = result.get("detailed_metrics", {})
         reasoning_rows = [
             {
                 "Metric": metric.replace("_", " ").title(),
-                "Score": values["score"],
+                "Score": values["score_10"],
                 "Reasoning": values["reason"],
             }
             for metric, values in details.items()
         ]
         st.dataframe(
-            pd.DataFrame(reasoning_rows).style.format({"Score": "{:.2f}"}),
+            pd.DataFrame(reasoning_rows),
             hide_index=True,
             use_container_width=True,
         )
 
-        status = "Passed" if result.get("passed") else "Below threshold"
-        st.caption(f"Evaluation status: **{status}** (threshold: 7.0 / 10).")
+        st.caption(result.get("confidence_note", "No confidence note available."))
+        status = "PASS" if result.get("passed") else "FAIL"
+        st.caption(f"LLM-judge status: **{status}** at a 0.70 DeepEval threshold.")
 
 
 initialize_state()
@@ -238,13 +261,13 @@ with st.sidebar:
         "Reference implementation (optional)",
         height=180,
         key="reference_code",
-        help="A reference implementation improves correctness evaluation.",
+        help="Reference code gives the correctness judge a stronger comparison point.",
     )
 
 st.title("LLM Code Generation Benchmark")
 st.write(
-    "Generate repository-aware code with two LLMs and compare the results "
-    "using the same task, repository context, and evaluation criteria."
+    "Compare two LLMs on the same repository-aware coding task, then separate "
+    "deterministic validation evidence from LLM-based quality judgment."
 )
 
 if st.session_state.context:
@@ -254,15 +277,16 @@ if st.session_state.context:
 else:
     st.info("Ingest a GitHub repository from the sidebar before generating code.")
 
-show_generated_results()
+show_generated_history()
 
-if prompt := st.chat_input("Describe the code you want to generate..."):
+if prompt := st.chat_input("Describe the code change you want..."):
     if not st.session_state.context:
         st.error("Ingest a GitHub repository before generating code.")
     else:
+        st.session_state.latest_task = prompt
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
 
         try:
             with st.chat_message("assistant"):
@@ -289,18 +313,6 @@ if prompt := st.chat_input("Describe the code you want to generate..."):
 
 st.divider()
 if st.button("Evaluate Latest Generation"):
-    latest_task = next(
-        (
-            message["content"]
-            for message in reversed(st.session_state.chat_history)
-            if message["role"] == "user"
-        ),
-        None,
-    )
-
-    if latest_task:
-        evaluate_generated_code(latest_task)
-    else:
-        st.error("Generate code before running an evaluation.")
+    evaluate_latest()
 
 show_evaluation_results()
