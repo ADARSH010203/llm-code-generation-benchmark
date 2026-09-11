@@ -1,11 +1,7 @@
 """Evaluation utilities for repository-aware code generation.
 
-The benchmark deliberately combines two kinds of evidence:
-- deterministic checks (for example, syntax and obvious secret patterns), and
-- LLM-based judging for qualities that are difficult to measure statically.
-
-DeepEval metric scores are kept in their native 0-1 range. The UI can display
-them on a 0-10 scale for readability.
+The benchmark combines deterministic evidence with LLM-based judging. DeepEval
+scores are kept in their native 0-1 range and displayed on a 0-10 scale in UI.
 """
 
 from __future__ import annotations
@@ -33,11 +29,12 @@ def _metric(
         "name": name,
         "evaluation_steps": steps,
         "evaluation_params": evaluation_params,
+        # GEval returns a normalized 0-1 score even when a rubric is supplied.
         "rubric": [
-            Rubric(score_range=(0, 2), expected_outcome="Poor; major problems make the implementation unsuitable."),
-            Rubric(score_range=(3, 5), expected_outcome="Partially acceptable; important problems remain."),
-            Rubric(score_range=(6, 8), expected_outcome="Good; mostly correct with minor issues."),
-            Rubric(score_range=(9, 10), expected_outcome="Excellent; complete and reliable for the stated task."),
+            Rubric(score_range=(0.0, 0.2), expected_outcome="Poor; major problems make the implementation unsuitable."),
+            Rubric(score_range=(0.3, 0.5), expected_outcome="Partially acceptable; important problems remain."),
+            Rubric(score_range=(0.6, 0.8), expected_outcome="Good; mostly correct with minor issues."),
+            Rubric(score_range=(0.9, 1.0), expected_outcome="Excellent; complete and reliable for the stated task."),
         ],
         "threshold": LLM_SCORE_THRESHOLD,
     }
@@ -62,12 +59,9 @@ def evaluate_code(
     task: str,
     repository_context: str | None = None,
     reference_code: str | None = None,
+    execution_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate one generated implementation without executing it.
-
-    A reference implementation strengthens correctness evaluation, while
-    repository context lets the judge consider integration and conventions.
-    """
+    """Evaluate generated output with deterministic and semantic evidence."""
     validation = validate_generated_output(generated_code)
     if not generated_code.strip():
         return {
@@ -76,6 +70,7 @@ def evaluate_code(
             "overall_score_10": 0.0,
             "detailed_metrics": {},
             "validation": validation,
+            "execution": execution_result,
             "passed": False,
         }
 
@@ -84,50 +79,47 @@ def evaluate_code(
         if repository_context:
             evaluation_input += f"\n\nRepository context:\n{repository_context.strip()}"
 
-        test_case_kwargs: dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "input": evaluation_input,
             "actual_output": generated_code,
         }
         correctness_params = [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT]
-
         if reference_code:
-            test_case_kwargs["expected_output"] = reference_code
+            kwargs["expected_output"] = reference_code
             correctness_params.append(SingleTurnParams.EXPECTED_OUTPUT)
 
-        test_case = LLMTestCase(**test_case_kwargs)
+        test_case = LLMTestCase(**kwargs)
 
         correctness = _metric(
-            name="Code Correctness",
-            steps=[
+            "Code Correctness",
+            [
                 "Check whether the implementation directly solves the requested task.",
                 "Check whether required behavior is complete and internally consistent.",
                 "Look for obvious runtime failures, broken assumptions, and relevant edge cases.",
-                "When reference code is provided, compare expected behavior with the generated implementation.",
+                "When reference code is provided, compare intended behavior with the generated implementation.",
                 "Use repository context to identify clear integration conflicts or invented APIs.",
             ],
-            evaluation_params=correctness_params,
+            correctness_params,
         )
-
         readability = _metric(
-            name="Code Readability",
-            steps=[
-                "Check naming, formatting, indentation, and logical organization.",
-                "Check whether functions and modules have focused responsibilities.",
+            "Code Readability",
+            [
+                "Check naming, formatting, indentation, and organization.",
+                "Check whether responsibilities are focused and understandable.",
                 "Assess comments and docstrings for useful context without unnecessary noise.",
                 "Penalize avoidable duplication, cleverness, and unnecessary abstraction.",
             ],
-            evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+            [SingleTurnParams.ACTUAL_OUTPUT],
         )
-
         best_practices = _metric(
-            name="Code Best Practices",
-            steps=[
+            "Code Best Practices",
+            [
                 "Check error handling and failure behavior.",
-                "Check for hard-coded credentials, unsafe input handling, or insecure defaults.",
+                "Check for hard-coded credentials, unsafe input handling, and insecure defaults.",
                 "Look for avoidable complexity and obvious performance problems.",
                 "Check modularity, reuse, separation of concerns, and maintainability.",
             ],
-            evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+            [SingleTurnParams.ACTUAL_OUTPUT],
         )
 
         metrics = [correctness, readability, best_practices]
@@ -141,18 +133,19 @@ def evaluate_code(
         }
         llm_score = sum(item["score"] for item in detailed_metrics.values()) / len(detailed_metrics)
 
-        hard_failure = not validation["security"]["passed"]
-        passed = llm_score >= LLM_SCORE_THRESHOLD and not hard_failure
+        security_failed = not validation["security"]["passed"]
+        execution_failed = execution_result is not None and execution_result.get("executed") and execution_result.get("passed") is False
+        passed = llm_score >= LLM_SCORE_THRESHOLD and not security_failed and not execution_failed
 
         return {
             "overall_score": round(llm_score, 4),
             "overall_score_10": round(llm_score * DISPLAY_SCALE, 2),
             "detailed_metrics": detailed_metrics,
             "validation": validation,
+            "execution": execution_result,
             "passed": passed,
-            "confidence_note": _confidence_note(validation, reference_code),
+            "confidence_note": _confidence_note(validation, reference_code, execution_result),
         }
-
     except Exception as exc:
         return {
             "error": f"Evaluation failed: {exc}",
@@ -160,6 +153,7 @@ def evaluate_code(
             "overall_score_10": 0.0,
             "detailed_metrics": {},
             "validation": validation,
+            "execution": execution_result,
             "passed": False,
         }
 
@@ -170,7 +164,7 @@ def compare_outputs(
     llama_output: str,
     reference_code: str | None = None,
 ) -> dict[str, Any]:
-    """Run a blinded pairwise judge to choose the stronger implementation."""
+    """Run DeepEval's blinded pairwise judge for the two model outputs."""
     try:
         expected_output = reference_code
         contestants = [
@@ -193,7 +187,6 @@ def compare_outputs(
                 ),
             ),
         ]
-
         case = ArenaTestCase(contestants=contestants)
         params = [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT]
         if reference_code:
@@ -203,9 +196,9 @@ def compare_outputs(
             "name": "Code Generation Pairwise Comparison",
             "evaluation_steps": [
                 "Choose the implementation that better satisfies the coding task.",
-                "Prefer correct behavior, repository fit, clear design, security, and maintainability.",
-                "Do not prefer an implementation only because it is longer or more verbose.",
-                "When reference code is provided, use it as evidence of intended behavior.",
+                "Prefer correct behavior, repository fit, security, clarity, and maintainability.",
+                "Do not prefer an implementation merely because it is longer or more verbose.",
+                "When reference code is supplied, use it as evidence of intended behavior.",
             ],
             "evaluation_params": params,
         }
@@ -214,7 +207,6 @@ def compare_outputs(
 
         metric = ArenaGEval(**kwargs)
         metric.measure(case)
-
         return {
             "winner": metric.winner,
             "reason": metric.reason or "No pairwise reasoning returned.",
@@ -226,10 +218,14 @@ def compare_outputs(
         }
 
 
-def _confidence_note(validation: dict[str, Any], reference_code: str | None) -> str:
-    """Describe the strength of the evidence behind the displayed score."""
-    if validation.get("execution_verified") or validation.get("tests_executed"):
-        return "High evidence: deterministic execution/tests were also available."
+def _confidence_note(
+    validation: dict[str, Any],
+    reference_code: str | None,
+    execution_result: dict[str, Any] | None,
+) -> str:
+    """Explain how much evidence supports the displayed evaluation."""
+    if execution_result and execution_result.get("executed"):
+        return "High evidence: deterministic sandbox commands were executed in addition to static validation and LLM judging."
     if reference_code and validation["syntax"].get("passed") is True:
         return "Medium evidence: static validation plus reference-based LLM judging; runtime behavior was not executed."
     if validation["syntax"].get("passed") is True:
