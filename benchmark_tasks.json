@@ -1,0 +1,62 @@
+[
+  {
+    "id": "py-001",
+    "category": "bug_fix",
+    "language": "python",
+    "task": "Fix the target function so it handles an empty input and preserves the existing public API. Add or update tests when the repository already has a test pattern."
+  },
+  {
+    "id": "py-002",
+    "category": "feature",
+    "language": "python",
+    "task": "Add input validation for a user-facing function. Reject malformed input with the repository's existing error-handling convention and keep valid inputs unchanged."
+  },
+  {
+    "id": "py-003",
+    "category": "refactor",
+    "language": "python",
+    "task": "Refactor one duplicated helper into a reusable function without changing observable behavior or public interfaces."
+  },
+  {
+    "id": "py-004",
+    "category": "security",
+    "language": "python",
+    "task": "Harden the relevant code path against unsafe user input without hard-coding credentials or changing unrelated behavior."
+  },
+  {
+    "id": "web-001",
+    "category": "frontend_feature",
+    "language": "web",
+    "task": "Add a small UI feature using the repository's existing component and state-management patterns. Update affected tests when present."
+  },
+  {
+    "id": "web-002",
+    "category": "frontend_bug_fix",
+    "language": "web",
+    "task": "Fix a user-visible frontend bug while preserving the existing design system and avoiding unnecessary dependencies."
+  },
+  {
+    "id": "web-003",
+    "category": "integration",
+    "language": "web",
+    "task": "Connect an existing frontend view to the repository's existing API/client layer and handle loading, success, and failure states consistently."
+  },
+  {
+    "id": "api-001",
+    "category": "backend_feature",
+    "language": "api",
+    "task": "Add a small API endpoint following the repository's existing routing, validation, response, and error-handling patterns."
+  },
+  {
+    "id": "api-002",
+    "category": "backend_security",
+    "language": "api",
+    "task": "Improve authorization or input validation for an existing API operation without exposing credentials or sensitive data in responses or logs."
+  },
+  {
+    "id": "integration-001",
+    "category": "multi_file",
+    "language": "mixed",
+    "task": "Implement a small cross-file feature that requires coordinated changes in the most relevant existing modules and tests. Avoid unrelated rewrites."
+  }
+]
