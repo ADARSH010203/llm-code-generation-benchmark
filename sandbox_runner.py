@@ -1,8 +1,8 @@
 """Optional isolated execution for generated multi-file code.
 
-The runner is deliberately conservative: Docker is required, networking is
-blocked by default, resources are capped, and generated code is never run on
-the host Python process.
+Generated code is treated as untrusted. Docker is required, the container has
+no network by default, CPU/memory/process limits are applied, and the workspace
+is removed after the check completes.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ MAX_OUTPUT_CHARS = 12_000
 
 
 def _safe_relative_path(path: str) -> Path:
-    """Reject paths that could escape the temporary workspace."""
+    """Reject paths that can escape the temporary workspace."""
     candidate = Path(path.replace("\\", "/"))
     if candidate.is_absolute() or ".." in candidate.parts:
         raise ValueError(f"Unsafe generated path: {path}")
@@ -29,7 +29,7 @@ def _safe_relative_path(path: str) -> Path:
 
 
 def parse_generated_files(output: str) -> list[dict[str, str]]:
-    """Parse the FILE: path + fenced code format emitted for multi-file tasks."""
+    """Parse the FILE: path + fenced code format used for multi-file tasks."""
     pattern = re.compile(
         r"FILE:\s*(?P<path>[^\n]+)\n```(?P<language>[^\n]*)\n(?P<code>.*?)\n```",
         re.IGNORECASE | re.DOTALL,
@@ -44,26 +44,65 @@ def parse_generated_files(output: str) -> list[dict[str, str]]:
     ]
 
 
-def _detect_commands(root: Path) -> list[list[str]]:
-    """Detect conservative repository checks without inventing commands."""
-    commands: list[list[str]] = []
-    if (root / "pytest.ini").exists() or (root / "tests").is_dir() or (root / "pyproject.toml").exists():
-        if shutil.which("python"):
-            commands.append(["python", "-m", "compileall", "-q", "."])
+def _detect_commands(root: Path) -> list[tuple[str, list[str]]]:
+    """Select only deterministic checks that do not install arbitrary packages."""
+    commands: list[tuple[str, list[str]]] = []
+
+    if (
+        (root / "pyproject.toml").exists()
+        or (root / "requirements.txt").exists()
+        or (root / "tests").is_dir()
+    ):
+        commands.append(("python", ["python", "-m", "compileall", "-q", "."]))
 
     package_json = root / "package.json"
-    if package_json.exists():
+    node_modules = root / "node_modules"
+    if package_json.exists() and node_modules.is_dir():
         try:
             data = json.loads(package_json.read_text(encoding="utf-8"))
             scripts = data.get("scripts", {})
             if "test" in scripts:
-                commands.append(["npm", "test", "--", "--runInBand"])
-            elif "build" in scripts:
-                commands.append(["npm", "run", "build"])
+                commands.append(("node", ["npm", "test", "--", "--runInBand"]))
+            if "build" in scripts:
+                commands.append(("node", ["npm", "run", "build"]))
         except (OSError, json.JSONDecodeError):
             pass
 
     return commands
+
+
+def _docker_command(
+    image: str,
+    command: list[str],
+    workspace: Path,
+) -> list[str]:
+    """Build the restricted docker invocation."""
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "1.0",
+        "--memory",
+        "1g",
+        "--pids-limit",
+        "128",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=256m",
+        "-v",
+        f"{workspace}:/workspace:rw",
+        "-w",
+        "/workspace",
+        image,
+        *command,
+    ]
 
 
 def run_generated_workspace(
@@ -71,14 +110,10 @@ def run_generated_workspace(
     base_repository: str | os.PathLike[str] | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Run generated code in a Docker sandbox when Docker is available.
-
-    The function returns evidence only; it never treats a passing command as
-    proof of full application correctness. Network access is disabled and the
-    container is removed after execution.
-    """
-    docker = shutil.which("docker")
+    """Apply generated files to a temporary workspace and run safe checks."""
     files = parse_generated_files(generated_output)
+    docker = shutil.which("docker")
+
     if not files:
         return {
             "available": bool(docker),
@@ -96,22 +131,24 @@ def run_generated_workspace(
 
     with tempfile.TemporaryDirectory(prefix="llm-benchmark-") as temp_dir:
         root = Path(temp_dir)
+        workspace = root / "repo"
+        workspace.mkdir()
 
         if base_repository:
             source_root = Path(base_repository).resolve()
-            if source_root.exists():
-                shutil.copytree(source_root, root / "repo", dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".venv", "node_modules"))
-                workspace = root / "repo"
-            else:
+            if not source_root.is_dir():
                 return {
                     "available": True,
                     "executed": False,
                     "passed": None,
                     "message": "Base repository path does not exist locally.",
                 }
-        else:
-            workspace = root / "repo"
-            workspace.mkdir()
+            shutil.copytree(
+                source_root,
+                workspace,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".git", ".venv", "node_modules"),
+            )
 
         try:
             for item in files:
@@ -126,51 +163,45 @@ def run_generated_workspace(
                 "message": f"Workspace creation failed: {exc}",
             }
 
-        commands = _detect_commands(workspace)
-        if not commands:
+        checks = _detect_commands(workspace)
+        if not checks:
             return {
                 "available": True,
                 "executed": False,
                 "passed": None,
-                "message": "No safe deterministic test/build command was detected.",
+                "message": (
+                    "No safe deterministic test/build command was detected. "
+                    "Node projects need existing node_modules; dependencies are not installed automatically."
+                ),
                 "files": [item["path"] for item in files],
             }
 
         results: list[dict[str, Any]] = []
         all_passed = True
-        for command in commands:
-            completed = subprocess.run(
-                [
-                    docker,
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--cpus",
-                    "1.0",
-                    "--memory",
-                    "1g",
-                    "--pids-limit",
-                    "128",
-                    "--read-only",
-                    "--tmpfs",
-                    "/tmp:rw,noexec,nosuid,size=256m",
-                    "-v",
-                    f"{workspace}:/workspace:rw",
-                    "-w",
-                    "/workspace",
-                    "python:3.12-slim",
-                    *command,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+        for language, command in checks:
+            image = "node:22-bookworm-slim" if language == "node" else "python:3.12-slim"
+            try:
+                completed = subprocess.run(
+                    _docker_command(image, command, workspace),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    "available": True,
+                    "executed": True,
+                    "passed": False,
+                    "message": f"Sandbox command timed out after {timeout_seconds} seconds.",
+                    "commands": results,
+                }
+
             passed = completed.returncode == 0
             all_passed = all_passed and passed
             results.append(
                 {
+                    "language": language,
                     "command": command,
                     "passed": passed,
                     "returncode": completed.returncode,
@@ -183,6 +214,50 @@ def run_generated_workspace(
             "available": True,
             "executed": True,
             "passed": all_passed,
-            "message": "Deterministic commands executed inside a Docker sandbox.",
+            "message": "Deterministic checks executed inside a restricted Docker sandbox.",
             "commands": results,
         }
+
+
+def clone_and_run(
+    repo_url: str,
+    generated_output: str,
+    timeout_seconds: int = DEFAULT_TIMEOUT,
+) -> dict[str, Any]:
+    """Clone a public repository, overlay generated files, and run sandbox checks.
+
+    Repository download happens outside Docker because the sandbox itself has no
+    network. The cloned source is never executed on the host.
+    """
+    git = shutil.which("git")
+    if not git:
+        return {
+            "available": False,
+            "executed": False,
+            "passed": None,
+            "message": "Git is not installed; repository-backed sandbox check was skipped.",
+        }
+
+    with tempfile.TemporaryDirectory(prefix="llm-repo-") as temp_dir:
+        repo_path = Path(temp_dir) / "repo"
+        try:
+            subprocess.run(
+                [git, "clone", "--depth", "1", "--no-tags", repo_url.strip(), str(repo_path)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            return {
+                "available": bool(shutil.which("docker")),
+                "executed": False,
+                "passed": None,
+                "message": f"Repository clone failed: {exc}",
+            }
+
+        return run_generated_workspace(
+            generated_output,
+            base_repository=repo_path,
+            timeout_seconds=timeout_seconds,
+        )
