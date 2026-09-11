@@ -1,32 +1,27 @@
 # LLM Code Generation Benchmark
 
-> Repository-aware LLM code-generation benchmark with task-aware retrieval, deterministic validation, DeepEval scoring, pairwise model comparison, and optional isolated checks.
+> A repository-aware benchmark that compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** on the same coding task, then combines deterministic validation with **DeepEval** judging.
 
-## Clean project structure
+## Project structure
 
 ```text
 .
 ├── app.py                         # Streamlit entry point
-│
-├── benchmark/                     # Canonical application code
+├── benchmark/                     # Canonical benchmark implementation
 │   ├── __init__.py
-│   ├── evaluation.py              # GEval + ArenaGEval
+│   ├── evaluation.py              # GEval + ArenaGEval scoring
 │   ├── ingestion.py               # GitHub ingestion + redaction
-│   ├── model_service.py           # LLM calls and streaming
-│   ├── retrieval.py               # Task-aware file retrieval
-│   ├── sandbox.py                 # Optional isolated execution checks
-│   └── validation.py              # Static validation and security checks
-│
+│   ├── model_service.py           # Provider/model calls + streaming
+│   ├── retrieval.py               # Task-aware repository retrieval
+│   ├── sandbox.py                 # Optional isolated checks
+│   └── validation.py              # Static validation + security checks
 ├── data/
 │   └── benchmark_tasks.json       # Starter benchmark tasks
-│
 ├── docs/
 │   └── BENCHMARK.md               # Benchmark protocol
-│
-├── evals/                         # Evaluation suite namespace
-├── tests/                         # Deterministic tests
-├── artifacts/                     # Local benchmark output directory
-│
+├── evals/
+├── tests/
+├── artifacts/
 ├── .github/workflows/ci.yml
 ├── .env.example
 ├── .gitignore
@@ -36,15 +31,15 @@
 └── requirements.txt
 ```
 
-The former root-level implementation modules are thin compatibility shims. The source of truth is `benchmark/`.
+The former root-level implementation modules are now thin compatibility shims. The source of truth is the `benchmark/` package.
 
-## What this project does
+## What this project is
 
-The benchmark answers a practical software-engineering question:
+This is an experiment framework for a practical software-engineering question:
 
 **Given the same existing codebase and the same requested change, which model produces the stronger implementation?**
 
-The same repository context and task are sent to **Cohere Aya Expanse** and **Meta Llama 4 Scout**. Their outputs are streamed in parallel, validated, evaluated with DeepEval, and compared head-to-head.
+The same repository/task inputs go to Aya Expanse and Llama 4 Scout. Their outputs are streamed in parallel, checked, scored, and compared head-to-head.
 
 ## Workflow
 
@@ -55,7 +50,7 @@ GitHub Repository
       ↓
  Sanitized Repository Context
       ↓
- Task-aware Retrieval
+ Task-aware File Retrieval
       ↓
  ┌───────────────┐
  ↓               ↓
@@ -80,58 +75,50 @@ Static Checks   DeepEval
 
 ## Evaluation
 
-Deterministic checks and LLM judging are kept separate.
+### Deterministic evidence
 
-| Layer | Checks |
+- Python syntax/compile checks where applicable
+- Basic HTML parsing
+- Multi-file output parsing
+- Obvious credential-pattern scanning
+- File and line counts
+- Optional restricted Docker checks
+
+### DeepEval judging
+
+| Metric | Purpose |
 |---|---|
-| Deterministic | Python syntax/compile, basic HTML parsing, multi-file parsing, credential patterns, file/line counts |
-| DeepEval | Correctness, readability, best practices |
-| Pairwise | Which candidate is better overall? |
-| Sandbox | Optional isolated repository checks for generated multi-file output |
+| Correctness | Task compliance, expected behavior, edge cases, runtime risks, repository fit |
+| Readability | Naming, organization, formatting, documentation, maintainability |
+| Best Practices | Error handling, security, efficiency, modularity, configuration hygiene |
 
-DeepEval metric values remain in their native `0–1` range internally and are displayed on a `0–10` scale. Current threshold: `0.70`.
+DeepEval scores stay in their native `0–1` range internally and are displayed on a `0–10` scale. Current threshold: `0.70`.
 
-## Large repository handling
+### Pairwise comparison
 
-The original flat workflow could overwhelm a model by sending the complete repository every time. The current retrieval layer ranks candidate file sections against the task and sends a bounded context instead.
+ArenaGEval is used separately for the direct question: **which candidate is better?** Its result is not merged into the individual numerical score.
 
-This improves context efficiency, but lexical retrieval is not perfect. Very large repositories can still require semantic embeddings and dependency-aware retrieval.
+## Large repository / website behavior
 
-## Small task vs full website
+A small function and a complete website are different evaluation problems. Large repositories can overwhelm a single prompt, so task-aware retrieval selects candidate files and sends a bounded context.
 
-A ten-line function and a complete website should not receive the same evidence standard.
+For multi-file work, models return a structured `FILE:` format and the validator checks the detected files.
 
-For a focused Python change, static validation plus DeepEval can provide a useful comparative signal.
-
-For a multi-file feature, the models return structured `FILE:` blocks and the validator checks the detected files.
-
-For a full website, reliable evaluation requires applying the generated change to a repository snapshot, running tests/builds in isolation, and eventually performing browser smoke tests. The current sandbox deliberately avoids arbitrary dependency installation and arbitrary repository-script execution.
+For a full website, reliable evaluation requires applying the generated change to a repository snapshot, running tests/builds in isolation, and eventually performing browser smoke tests. The current Docker layer is deliberately conservative and does not install arbitrary dependencies or execute arbitrary repository scripts by default.
 
 ## Security
 
-Repository content and model output are untrusted input.
+Repository content and model output are treated as untrusted. The ingestion layer redacts obvious credentials, prompts treat repository comments/documentation as data rather than instructions, generated paths are checked for traversal, and provider credentials stay outside source code.
 
-The benchmark redacts obvious credentials before model use, treats repository comments/documentation as data rather than instructions, rejects unsafe generated paths, and keeps provider credentials outside source files. Docker checks use network isolation and resource limits.
+Previously exposed credentials were revoked/rotated and removed from the current branch. Old Git objects may still contain historical material until the history is rewritten.
 
-Previously exposed credentials were revoked/rotated and removed from the current branch. Old Git objects may still contain historical material until history is rewritten.
+## Benchmark protocol
 
-## Benchmark tasks and reproducibility
+See [`docs/BENCHMARK.md`](docs/BENCHMARK.md) for the evaluation ladder, threat model, scoring guidance, reproducibility requirements, and limitations.
 
-Starter tasks are stored in `data/benchmark_tasks.json`. The detailed protocol is in `docs/BENCHMARK.md`.
+Starter tasks are in [`data/benchmark_tasks.json`](data/benchmark_tasks.json).
 
-For meaningful comparisons, run multiple tasks and multiple trials and record:
-
-```text
-mean / median score
-pass rate
-pairwise win rate
-syntax / test / build failure rate
-latency
-token usage / cost when available
-model + repository revision
-```
-
-One task and one run should not be presented as a universal model ranking.
+For meaningful comparisons, use multiple tasks and multiple trials and report quality mean/median, pass rate, pairwise win rate, failure rate, latency, and token/cost data when available.
 
 ## Setup
 
@@ -142,7 +129,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env`, add your provider credentials locally, and never commit real keys.
+Copy `.env.example` to `.env` and configure credentials locally. Never commit real keys.
 
 Run:
 
@@ -155,12 +142,12 @@ streamlit run app.py
 1. Enter a public GitHub repository URL.
 2. Click **Ingest Repository**.
 3. Describe one concrete coding change.
-4. Compare the two model outputs.
-5. Review the retrieved files.
-6. Optionally provide a reference implementation.
+4. Compare Aya Expanse and Llama 4 Scout outputs.
+5. Review task-ranked retrieval evidence.
+6. Optionally provide reference code.
 7. Run **Evaluate Latest Generation**.
 8. For multi-file output, run **Run Isolated Checks** when Docker is available.
-9. Review quality scores, deterministic evidence, sandbox results, and pairwise winner.
+9. Review scores, validation evidence, sandbox results, and pairwise winner.
 
 ## Technology
 
@@ -171,9 +158,9 @@ Python 3.12+, Streamlit, LiteLLM, GitIngest, DeepEval, Pandas, Plotly, Docker (o
 - Semantic + dependency-aware retrieval
 - Stronger JavaScript/TypeScript/CSS validation
 - Safe test/build discovery
-- Browser smoke testing
+- Browser-level smoke testing
 - Latency/token/cost telemetry
-- Multi-trial statistical reports
+- Multi-trial statistical benchmark reports
 - JSON/CSV result export
 - CI benchmark regression suite
 
