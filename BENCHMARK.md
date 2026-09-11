@@ -1,40 +1,26 @@
 # Benchmark Protocol
 
-This repository is designed to compare code-generation models, not to claim that an LLM score is the probability that code is correct.
+This benchmark compares model outputs using deterministic validation and DeepEval. An LLM score is not treated as a probability of correctness.
 
-## Recommended test ladder
+## Test ladder
 
-### 1. Small change
-Use a focused task such as adding one function or fixing one bug. Record the generated code, deterministic syntax/security checks, and DeepEval scores.
+### Small change
+Use a focused function or bug fix. Run syntax/compile checks, security scanning, and DeepEval. Add reference code when possible.
 
-### 2. Medium change
-Ask for a change spanning a few modules. Use the multi-file output format and check every detected source file. Supply a reference implementation when practical.
+### Medium change
+Use structured multi-file output and validate every detected source file. Use repository tests when they exist.
 
-### 3. Full feature / website
-Treat this as an integration task. The model should return all files it creates or changes. Semantic evaluation alone is insufficient; a serious benchmark should also install dependencies, build the project, run tests, and perform a smoke test in an isolated environment.
+### Full feature or website
+Treat the result as an integration artifact. A strong evaluation should materialize generated files in an isolated workspace, install declared dependencies, run tests, build the application, and perform smoke/browser checks. The current application deliberately does not execute arbitrary generated code.
 
-## What the current implementation verifies
+## Current evidence
 
-- Model outputs are generated under the same task and repository context.
-- Python files can be parsed and compiled without running them.
-- HTML files receive a basic parser check.
+- Both models receive the same task and repository context.
+- Python output can be parsed and compiled without executing it.
+- HTML output receives a basic parser check.
 - Obvious hard-coded credential patterns are flagged.
 - DeepEval judges correctness, readability, and best practices.
 
-## What it does not verify yet
+## Important limitation
 
-- Application runtime behavior
-- Browser behavior for JavaScript/CSS
-- Dependency installation success
-- End-to-end integration
-- Functional tests or test coverage
-- Performance under load
-- Security of arbitrary generated code execution
-
-## Why this matters
-
-A 20-line utility and a 200-file website should not be evaluated as if they were the same kind of task. The benchmark therefore reports deterministic evidence separately from the LLM judge and keeps execution verification explicitly false until a sandboxed test runner is added.
-
-## Next benchmark milestone
-
-The next step is an isolated execution harness that accepts a generated multi-file artifact, installs only declared dependencies, applies CPU/memory/time limits, runs a known test suite, and records pass/fail, latency, and resource usage. That result can then be combined with DeepEval rather than replaced by it.
+A program can compile and still be functionally wrong. A website can contain valid HTML and still fail because of JavaScript, CSS, dependencies, missing assets, or integration problems. The benchmark reports validation evidence separately from the LLM-judge score for that reason.
