@@ -1,4 +1,6 @@
-"""LLM-as-a-judge evaluation for generated code."""
+"""LLM-as-a-judge evaluation combined with deterministic validation."""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -6,7 +8,10 @@ from deepeval.metrics import GEval
 from deepeval.metrics.g_eval import Rubric
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
-SCORE_THRESHOLD = 7.0
+from code_validation import validate_generated_output
+
+# DeepEval scores GEval metrics from 0 to 1. The UI converts them to 0–10.
+LLM_SCORE_THRESHOLD = 0.70
 
 
 def _metric(
@@ -15,7 +20,7 @@ def _metric(
     steps: list[str],
     params: list[LLMTestCaseParams],
 ) -> GEval:
-    """Create a consistently configured G-Eval metric."""
+    """Create one consistently configured GEval metric."""
     return GEval(
         name=name,
         criteria=criteria,
@@ -25,10 +30,21 @@ def _metric(
             Rubric(score_range=(0, 2), expected_outcome="Poor; major problems make the result unsuitable."),
             Rubric(score_range=(3, 5), expected_outcome="Partially acceptable; important issues remain."),
             Rubric(score_range=(6, 8), expected_outcome="Good; mostly correct with minor issues."),
-            Rubric(score_range=(9, 10), expected_outcome="Excellent; complete, reliable, and production-ready."),
+            Rubric(score_range=(9, 10), expected_outcome="Excellent; complete and reliable for the stated task."),
         ],
-        threshold=SCORE_THRESHOLD,
+        threshold=LLM_SCORE_THRESHOLD,
     )
+
+
+def _metric_result(metric: GEval) -> dict[str, Any]:
+    """Convert a DeepEval metric into the application's result format."""
+    score = float(metric.score or 0.0)
+    return {
+        "score": score,
+        "score_10": round(score * 10, 2),
+        "reason": metric.reason or "No evaluator reasoning returned.",
+        "passed": metric.is_successful(),
+    }
 
 
 def evaluate_code(
@@ -36,19 +52,23 @@ def evaluate_code(
     task: str,
     reference_code: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate generated code for correctness, readability, and best practices.
+    """Evaluate generated code with deterministic checks and GEval.
 
-    A reference implementation is optional. When supplied, correctness is
-    judged against it. Without one, the evaluator uses the requested task and
-    repository context represented by the task description.
+    This function intentionally does not execute arbitrary model-generated code.
+    A successful syntax check is evidence that the source parses/compiles, not
+    proof that the program is functionally correct.
     """
     if not generated_code.strip():
         return {
             "error": "Generated code is empty.",
             "overall_score": 0.0,
+            "overall_score_10": 0.0,
             "detailed_metrics": {},
+            "validation": validate_generated_output(generated_code),
             "passed": False,
         }
+
+    validation = validate_generated_output(generated_code)
 
     try:
         test_case = LLMTestCase(
@@ -60,15 +80,15 @@ def evaluate_code(
         correctness = _metric(
             name="Code Correctness",
             criteria=(
-                "Evaluate whether the generated code satisfies the requested task, "
-                "is functionally sound, handles relevant edge cases, and avoids "
-                "obvious runtime or integration problems."
+                "Evaluate whether the generated implementation satisfies the task, "
+                "fits the repository context, handles relevant edge cases, and avoids "
+                "obvious runtime or integration mistakes."
             ),
             steps=[
-                "Compare the implementation with the requested task.",
-                "Check whether the required behavior is implemented completely.",
-                "Look for obvious runtime errors and incorrect assumptions.",
-                "Check relevant edge cases and integration with the stated repository context.",
+                "Compare the output with the requested task.",
+                "Check whether required behavior is implemented completely.",
+                "Look for obvious runtime errors, broken assumptions, and missing edge cases.",
+                "When reference code is provided, compare expected behavior with the implementation.",
             ],
             params=[
                 LLMTestCaseParams.INPUT,
@@ -79,12 +99,12 @@ def evaluate_code(
 
         readability = _metric(
             name="Code Readability",
-            criteria="Evaluate clarity, naming, formatting, structure, and useful documentation.",
+            criteria="Evaluate naming, formatting, organization, documentation, and maintainability.",
             steps=[
                 "Check naming for clarity and consistency.",
-                "Check formatting, indentation, and logical organization.",
-                "Assess whether comments and docstrings explain non-obvious behavior.",
-                "Check whether the implementation is easy for another developer to maintain.",
+                "Check formatting and logical organization.",
+                "Assess comments and docstrings for useful context without unnecessary noise.",
+                "Check whether another developer could reasonably maintain the implementation.",
             ],
             params=[LLMTestCaseParams.ACTUAL_OUTPUT],
         )
@@ -92,14 +112,13 @@ def evaluate_code(
         best_practices = _metric(
             name="Code Best Practices",
             criteria=(
-                "Evaluate maintainability, error handling, security, efficiency, "
-                "modularity, and responsible handling of configuration and secrets."
+                "Evaluate error handling, security, efficiency, modularity, and safe configuration."
             ),
             steps=[
                 "Check error handling and failure behavior.",
-                "Check for hard-coded secrets or unsafe configuration handling.",
-                "Assess unnecessary complexity and avoidable performance issues.",
-                "Check modularity, reuse, and separation of concerns.",
+                "Check for hard-coded credentials or unsafe configuration handling.",
+                "Look for unnecessary complexity and avoidable performance problems.",
+                "Check modularity, reuse, separation of concerns, and maintainability.",
             ],
             params=[LLMTestCaseParams.ACTUAL_OUTPUT],
         )
@@ -108,28 +127,45 @@ def evaluate_code(
         for metric in metrics:
             metric.measure(test_case)
 
-        scores = [metric.score for metric in metrics]
-        overall_score = sum(scores) / len(scores)
-
         detailed_metrics = {
-            "correctness": {"score": correctness.score, "reason": correctness.reason},
-            "readability": {"score": readability.score, "reason": readability.reason},
-            "best_practices": {
-                "score": best_practices.score,
-                "reason": best_practices.reason,
-            },
+            "correctness": _metric_result(correctness),
+            "readability": _metric_result(readability),
+            "best_practices": _metric_result(best_practices),
         }
 
+        llm_score = sum(item["score"] for item in detailed_metrics.values()) / len(detailed_metrics)
+
+        # A deterministic security failure is a hard fail. Other static checks
+        # are reported separately instead of pretending to establish correctness.
+        hard_failure = not validation["security"]["passed"]
+        passed = llm_score >= LLM_SCORE_THRESHOLD and not hard_failure
+
         return {
-            "overall_score": overall_score,
+            "overall_score": round(llm_score, 4),
+            "overall_score_10": round(llm_score * 10, 2),
             "detailed_metrics": detailed_metrics,
-            "passed": overall_score >= SCORE_THRESHOLD,
+            "validation": validation,
+            "passed": passed,
+            "confidence_note": _confidence_note(validation, reference_code),
         }
 
     except Exception as exc:
         return {
             "error": f"Evaluation failed: {exc}",
             "overall_score": 0.0,
+            "overall_score_10": 0.0,
             "detailed_metrics": {},
+            "validation": validation,
             "passed": False,
         }
+
+
+def _confidence_note(validation: dict[str, Any], reference_code: str | None) -> str:
+    """Explain what the evaluation can and cannot establish."""
+    if reference_code and validation["syntax"].get("passed") is True:
+        return "Medium evidence: static validation plus reference-based LLM judging. Runtime behavior was not executed."
+    if validation["syntax"].get("passed") is True:
+        return "Medium-low evidence: syntax/security checks plus LLM judging. Functional runtime behavior was not executed."
+    if validation["file_count"] > 1:
+        return "Low evidence for full-system correctness: multiple files were detected, but no integration test suite was executed."
+    return "Low evidence: semantic LLM judging was used, but executable correctness was not verified."
