@@ -20,7 +20,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
 MODEL_LABELS = {
     "aya_expanse": "Cohere Aya Expanse",
     "llama_scout": "Meta Llama 4 Scout",
@@ -33,14 +32,8 @@ def initialize_state() -> None:
         "chat_history": [],
         "context": None,
         "reference_code": "",
-        "last_generated_code": {
-            "aya_expanse": None,
-            "llama_scout": None,
-        },
-        "evaluation_results": {
-            "aya_expanse": None,
-            "llama_scout": None,
-        },
+        "last_generated_code": {"aya_expanse": None, "llama_scout": None},
+        "evaluation_results": {"aya_expanse": None, "llama_scout": None},
     }
 
     for key, value in defaults.items():
@@ -77,14 +70,13 @@ async def generate_code(task: str) -> tuple[str, str]:
         st.session_state.context,
     )
 
-    with st.container():
-        aya_column, llama_column = st.columns(2)
-        with aya_column:
-            st.subheader(MODEL_LABELS["aya_expanse"])
-            aya_placeholder = st.empty()
-        with llama_column:
-            st.subheader(MODEL_LABELS["llama_scout"])
-            llama_placeholder = st.empty()
+    aya_column, llama_column = st.columns(2)
+    with aya_column:
+        st.subheader(MODEL_LABELS["aya_expanse"])
+        aya_placeholder = st.empty()
+    with llama_column:
+        st.subheader(MODEL_LABELS["llama_scout"])
+        llama_placeholder = st.empty()
 
     llama_code, aya_code = await asyncio.gather(
         _consume_stream(llama_stream, llama_placeholder),
@@ -163,19 +155,16 @@ def show_evaluation_results() -> None:
     if not results["aya_expanse"] or not results["llama_scout"]:
         return
 
-    if results["aya_expanse"].get("error") or results["llama_scout"].get("error"):
-        st.error("One or more evaluations failed. Check the evaluation details below.")
-
     st.divider()
     st.header("Evaluation Results")
     st.caption("Scores are produced by an LLM-as-a-judge evaluation using DeepEval.")
 
+    if results["aya_expanse"].get("error") or results["llama_scout"].get("error"):
+        st.error("One or more evaluations failed. See the details below.")
+        return
+
     result_df = build_results_dataframe()
-    chart_df = result_df.melt(
-        id_vars="Metric",
-        var_name="Model",
-        value_name="Score",
-    )
+    chart_df = result_df.melt(id_vars="Metric", var_name="Model", value_name="Score")
 
     fig = px.bar(
         chart_df,
@@ -200,10 +189,6 @@ def show_evaluation_results() -> None:
 
     for model_name, result in results.items():
         st.subheader(f"{MODEL_LABELS[model_name]} — evaluator reasoning")
-        if result.get("error"):
-            st.error(result["error"])
-            continue
-
         details = result.get("detailed_metrics", {})
         reasoning_rows = [
             {
@@ -249,10 +234,10 @@ with st.sidebar:
 
     st.divider()
     st.header("Evaluation")
-    st.session_state.reference_code = st.text_area(
+    st.text_area(
         "Reference implementation (optional)",
-        value=st.session_state.reference_code,
         height=180,
+        key="reference_code",
         help="A reference implementation improves correctness evaluation.",
     )
 
@@ -303,12 +288,15 @@ if prompt := st.chat_input("Describe the code you want to generate..."):
             st.error(f"Code generation failed: {exc}")
 
 st.divider()
-if st.button("Evaluate Latest Generation", use_container_width=False):
-    latest_task = ""
-    for message in reversed(st.session_state.chat_history):
-        if message["role"] == "user":
-            latest_task = message["content"]
-            break
+if st.button("Evaluate Latest Generation"):
+    latest_task = next(
+        (
+            message["content"]
+            for message in reversed(st.session_state.chat_history)
+            if message["role"] == "user"
+        ),
+        None,
+    )
 
     if latest_task:
         evaluate_generated_code(latest_task)
