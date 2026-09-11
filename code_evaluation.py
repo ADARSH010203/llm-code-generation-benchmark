@@ -1,112 +1,135 @@
-from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+"""LLM-as-a-judge evaluation for generated code."""
+
+from typing import Any
+
 from deepeval.metrics import GEval
-from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 from deepeval.metrics.g_eval import Rubric
-from typing import Dict, Any
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
-def evaluate_code(generated_code: str, reference_code: str = None):
+SCORE_THRESHOLD = 7.0
+
+
+def _metric(
+    name: str,
+    criteria: str,
+    steps: list[str],
+    params: list[LLMTestCaseParams],
+) -> GEval:
+    """Create a consistently configured G-Eval metric."""
+    return GEval(
+        name=name,
+        criteria=criteria,
+        evaluation_steps=steps,
+        evaluation_params=params,
+        rubric=[
+            Rubric(score_range=(0, 2), expected_outcome="Poor; major problems make the result unsuitable."),
+            Rubric(score_range=(3, 5), expected_outcome="Partially acceptable; important issues remain."),
+            Rubric(score_range=(6, 8), expected_outcome="Good; mostly correct with minor issues."),
+            Rubric(score_range=(9, 10), expected_outcome="Excellent; complete, reliable, and production-ready."),
+        ],
+        threshold=SCORE_THRESHOLD,
+    )
+
+
+def evaluate_code(
+    generated_code: str,
+    task: str,
+    reference_code: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate generated code for correctness, readability, and best practices.
+
+    A reference implementation is optional. When supplied, correctness is
+    judged against it. Without one, the evaluator uses the requested task and
+    repository context represented by the task description.
+    """
+    if not generated_code.strip():
+        return {
+            "error": "Generated code is empty.",
+            "overall_score": 0.0,
+            "detailed_metrics": {},
+            "passed": False,
+        }
+
     try:
-        # Initialize test case
         test_case = LLMTestCase(
-            input="Code Generation Task",
+            input=task,
             actual_output=generated_code,
-            expected_output=reference_code if reference_code else ""
+            expected_output=reference_code or "No reference implementation was provided.",
         )
 
-        # Code Correctness Metric
-        correctness_metric = GEval(
+        correctness = _metric(
             name="Code Correctness",
-            criteria="Evaluate if the code is functionally correct, properly handles edge cases, and implements the required functionality completely.",
-            evaluation_steps=[
-                "Check if the code implements all required functionality",
-                "Verify proper handling of edge cases",
-                "Check for potential runtime errors",
-                "Assess if the code produces expected outputs"
+            criteria=(
+                "Evaluate whether the generated code satisfies the requested task, "
+                "is functionally sound, handles relevant edge cases, and avoids "
+                "obvious runtime or integration problems."
+            ),
+            steps=[
+                "Compare the implementation with the requested task.",
+                "Check whether the required behavior is implemented completely.",
+                "Look for obvious runtime errors and incorrect assumptions.",
+                "Check relevant edge cases and integration with the stated repository context.",
             ],
-            evaluation_params=[LLMTestCaseParams.ACTUAL_OUTPUT, LLMTestCaseParams.EXPECTED_OUTPUT],
-            rubric=[
-                Rubric(score_range=(0,2), expected_outcome="Code is non-functional or has critical errors"),
-                Rubric(score_range=(3,5), expected_outcome="Code works but misses key functionality"),
-                Rubric(score_range=(6,8), expected_outcome="Code is mostly correct with minor issues"),
-                Rubric(score_range=(9,10), expected_outcome="Code is completely correct")
+            params=[
+                LLMTestCaseParams.INPUT,
+                LLMTestCaseParams.ACTUAL_OUTPUT,
+                LLMTestCaseParams.EXPECTED_OUTPUT,
             ],
-            threshold=0.7
         )
 
-        # Code Readability Metric
-        readability_metric = GEval(
+        readability = _metric(
             name="Code Readability",
-            criteria="Evaluate code readability including proper naming, formatting, and documentation.",
-            evaluation_steps=[
-                "Check for clear and consistent naming conventions",
-                "Verify proper code formatting and indentation",
-                "Assess quality and completeness of comments and docstrings",
-                "Check for code organization and logical structure"
+            criteria="Evaluate clarity, naming, formatting, structure, and useful documentation.",
+            steps=[
+                "Check naming for clarity and consistency.",
+                "Check formatting, indentation, and logical organization.",
+                "Assess whether comments and docstrings explain non-obvious behavior.",
+                "Check whether the implementation is easy for another developer to maintain.",
             ],
-            evaluation_params=[LLMTestCaseParams.ACTUAL_OUTPUT],
-            rubric=[
-                Rubric(score_range=(0,2), expected_outcome="Code is poorly formatted and hard to read"),
-                Rubric(score_range=(3,5), expected_outcome="Code has basic formatting but lacks clarity"),
-                Rubric(score_range=(6,8), expected_outcome="Code is well formatted with minor issues"),
-                Rubric(score_range=(9,10), expected_outcome="Code is exceptionally readable and well documented")
-            ],
-            threshold=0.7
+            params=[LLMTestCaseParams.ACTUAL_OUTPUT],
         )
 
-        # Code Best Practices Metric
-        best_practices_metric = GEval(
+        best_practices = _metric(
             name="Code Best Practices",
-            criteria="Evaluate adherence to coding best practices, including error handling, security, and efficiency.",
-            evaluation_steps=[
-                "Check for proper error handling and exceptions",
-                "Verify security best practices",
-                "Assess code efficiency and performance considerations",
-                "Check for code reusability and modularity"
+            criteria=(
+                "Evaluate maintainability, error handling, security, efficiency, "
+                "modularity, and responsible handling of configuration and secrets."
+            ),
+            steps=[
+                "Check error handling and failure behavior.",
+                "Check for hard-coded secrets or unsafe configuration handling.",
+                "Assess unnecessary complexity and avoidable performance issues.",
+                "Check modularity, reuse, and separation of concerns.",
             ],
-            evaluation_params=[LLMTestCaseParams.ACTUAL_OUTPUT],
-            rubric=[
-                Rubric(score_range=(0,2), expected_outcome="Code ignores best practices"),
-                Rubric(score_range=(3,5), expected_outcome="Code follows basic practices with gaps"),
-                Rubric(score_range=(6,8), expected_outcome="Code mostly follows best practices"),
-                Rubric(score_range=(9,10), expected_outcome="Code perfectly follows all best practices")
-            ],
-            threshold=0.7
+            params=[LLMTestCaseParams.ACTUAL_OUTPUT],
         )
 
-        # Run evaluation
-        metrics = [correctness_metric, readability_metric, best_practices_metric]
+        metrics = [correctness, readability, best_practices]
         for metric in metrics:
             metric.measure(test_case)
 
-        # Calculate overall score
-        overall_score = (correctness_metric.score + readability_metric.score + best_practices_metric.score) / 3
+        scores = [metric.score for metric in metrics]
+        overall_score = sum(scores) / len(scores)
 
-        # Prepare detailed metrics
         detailed_metrics = {
-            "correctness": {
-                "score": correctness_metric.score,
-                "reason": correctness_metric.reason
-            },
-            "readability": {
-                "score": readability_metric.score,
-                "reason": readability_metric.reason
-            },
+            "correctness": {"score": correctness.score, "reason": correctness.reason},
+            "readability": {"score": readability.score, "reason": readability.reason},
             "best_practices": {
-                "score": best_practices_metric.score,
-                "reason": best_practices_metric.reason
-            }
+                "score": best_practices.score,
+                "reason": best_practices.reason,
+            },
         }
 
         return {
             "overall_score": overall_score,
             "detailed_metrics": detailed_metrics,
-            "passed": overall_score >= 0.7 
+            "passed": overall_score >= SCORE_THRESHOLD,
         }
 
-    except Exception as e:
+    except Exception as exc:
         return {
-            "error": f"Error evaluating code: {str(e)}",
+            "error": f"Evaluation failed: {exc}",
             "overall_score": 0.0,
             "detailed_metrics": {},
-            "passed": False
-        } 
+            "passed": False,
+        }
