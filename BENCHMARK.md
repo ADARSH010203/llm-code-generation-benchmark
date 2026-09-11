@@ -1,6 +1,6 @@
 # Benchmark Protocol
 
-The benchmark is designed to measure **repository-aware code generation**, not just whether an isolated snippet looks plausible.
+The benchmark measures **repository-aware code generation**, not only whether an isolated snippet looks plausible.
 
 ## Evaluation ladder
 
@@ -16,69 +16,114 @@ Run:
 
 ### Level 2 — Multi-file feature
 
-Examples: adding a small API endpoint, component, or service that spans several files.
+Examples: a small API endpoint, component, or service spanning several files.
 
-Run the same evaluation, but require the models to return every changed file using the `FILE:` format. Validate every supported source file that is detected.
+Run the same evaluation, but require every changed file in the `FILE:` format. Review retrieval coverage and validate every supported file that is detected.
 
 ### Level 3 — Full application / website
 
-A complete website is an integration problem. A strong benchmark should:
+A complete website is an integration problem. The target evaluation path is:
 
-1. Apply the generated patch in an isolated workspace.
-2. Install dependencies from the generated/project lockfiles.
-3. Run the repository's tests.
-4. Build the application.
-5. Run smoke or browser checks where appropriate.
-6. Capture failures, latency, token usage, and resource cost.
+1. Apply the generated files/patch to a repository snapshot.
+2. Perform deterministic static checks.
+3. Run safe tests/build steps inside an isolated environment.
+4. Run smoke/browser checks where appropriate.
+5. Record failures, timeouts, latency, token usage, and cost.
 
-The current Streamlit application intentionally stops before arbitrary code execution. This avoids turning an interactive evaluator into an execution environment for untrusted model output.
+The current sandbox implements a conservative subset of this ladder. It clones a public repository, overlays the generated multi-file output, and runs only predefined low-risk commands. It disables container networking, drops Linux capabilities, limits CPU/memory/processes, and does not automatically install dependencies or execute arbitrary repository scripts.
 
-## What the current implementation measures
+## Current implementation
 
 | Signal | Current behavior |
 |---|---|
-| Repository grounding | GitIngest summary + structure + bounded source context |
-| Secret exposure | Obvious credential patterns are redacted from ingested source and flagged in generated output |
-| Python syntax | AST parse + compilation without executing the generated program |
+| Repository grounding | GitIngest summary + structure + sanitized source |
+| Context selection | Task-aware lexical file ranking with a bounded context budget |
+| Prompt safety | Repository content is treated as untrusted data; prompt-injection instructions inside source are not followed |
+| Secret exposure | Obvious credential patterns are redacted before model use and scanned in generated output |
+| Python syntax | AST parse + compilation without running generated Python in the app process |
 | HTML | Lightweight parser validation |
-| Multi-file output | `FILE:` blocks are detected and counted |
+| Multi-file output | `FILE:` blocks are detected and safely materialized |
+| Sandbox | Optional Docker checks for a cloned repository snapshot |
 | Semantic quality | DeepEval GEval correctness, readability, best practices |
 | Relative model choice | DeepEval ArenaGEval pairwise comparison |
-| Statistical reliability | Not yet available; multi-run benchmark dataset is planned |
+| Repeated-trial statistics | Not yet automated; starter task suite is included |
+| Operational metrics | Latency/token/cost collection is planned |
 
 ## Scoring
 
-DeepEval metric scores are kept in their native **0–1** range. The dashboard multiplies them by 10 for human-readable display. The current per-metric pass threshold is `0.70`.
+DeepEval metrics return scores in the native **0–1** range. The dashboard multiplies those values by 10 for readability. The current per-metric pass threshold is `0.70`.
 
-The overall score is the arithmetic mean of the three GEval metrics. It is a quality signal, not a probability that the code is correct.
+The overall score is the arithmetic mean of the three GEval scores. It is a quality signal, not a probability that the implementation is correct.
 
-For the model-selection question, the benchmark also uses a pairwise ArenaGEval comparison. Pairwise judging is appropriate when the question is “which candidate is better?” rather than “does this single candidate pass a fixed bar?”
+ArenaGEval is used separately for the comparative question: **which candidate is better?** Its result should not be merged into the numerical overall score.
 
 ## Large-repository handling
 
-Repository source is capped by `MAX_CONTEXT_CHARS` before generation. This prevents an uncontrolled prompt from growing with repository size, but simple truncation can hide the exact file needed for a task.
+The original architecture could place the full repository source into a single model request. That becomes unreliable as repository size grows.
 
-This is why **file-aware retrieval/ranking is a planned improvement**. Until that exists, results from very large repositories should be considered lower-confidence.
+The current implementation instead ranks candidate file sections against the task and sends a bounded set of relevant sections. This reduces context pressure, but lexical ranking can still miss semantically related files.
 
-## Threat model
+For high-quality large-repository evaluation, the next retrieval layer should combine:
 
-The benchmark treats both repository content and model output as untrusted input.
+- lexical signals
+- semantic embeddings
+- import/dependency relationships
+- repository structure
+- task-specific file-type priors
 
-It therefore avoids executing generated code, avoids placing repository credentials directly into prompts when obvious secret patterns can be detected, and keeps provider credentials in environment variables.
+## Security model
 
-Static checks are intentionally conservative. A security scan that reports “clean” does not prove the absence of vulnerabilities, and a successful syntax check does not prove functional correctness.
+The benchmark treats repository content and generated output as untrusted.
 
-## Reproducibility requirements
+Important boundaries:
 
-For a meaningful published comparison, fix and record:
+- Provider credentials stay outside source files.
+- Obvious credentials in ingested source are redacted before model use.
+- Generated paths cannot escape the sandbox workspace.
+- Generated code is not executed by the main Streamlit process.
+- Docker execution uses no network, reduced privileges, and resource limits.
+- Dependency installation is deliberately not automatic because it would expand the attack surface and make execution behavior repository-dependent.
 
-- task text and task dataset version
-- repository commit / revision
-- model identifiers
+A clean static scan does not prove that a program has no vulnerabilities.
+
+## Reproducibility
+
+For a meaningful model comparison, record:
+
+- benchmark task ID and task text
+- repository URL and exact revision
+- model identifier and provider
 - generation settings
 - evaluation model and metric definitions
+- retrieval settings
 - number of trials
-- time of evaluation
-- failures and timeouts
+- timestamp
+- failures, timeouts, and execution results
 
-A single run should not be presented as a universal ranking.
+Use the included `benchmark_tasks.json` as the starting task set. Run each task multiple times before making model-level claims.
+
+## Suggested analysis
+
+For each model, report:
+
+```text
+Quality score       mean / median / variance
+Task pass rate      passed tasks / total tasks
+Pairwise win rate   wins / comparisons
+Syntax failure rate failed static checks / total
+Test/build failure  failed execution checks / executed checks
+Latency             time to first token + total generation time
+Cost                provider-reported or estimated cost
+```
+
+A single task, a single prompt, or a single run should not be presented as evidence that one model is universally better.
+
+## Limitations
+
+1. Lexical retrieval can miss semantically relevant files.
+2. Context selection can still omit important dependencies in very large repositories.
+3. The sandbox intentionally does not perform arbitrary dependency installation.
+4. Browser-level testing is not yet integrated.
+5. LLM judge scores are nondeterministic.
+6. Model/provider revisions can change results over time.
+7. Ambiguous benchmark tasks can invalidate otherwise careful measurements.
