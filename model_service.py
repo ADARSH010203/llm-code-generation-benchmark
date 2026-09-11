@@ -19,9 +19,26 @@ MODEL_CONFIG = {
     },
 }
 
+# Prevent very large repositories from being copied into every model request.
+# Full retrieval/ranking is a future improvement; this guard keeps the current
+# workflow predictable and makes the limitation explicit.
+MAX_CONTEXT_CHARS = 80_000
+
+
+def _limit_source_context(content: str) -> str:
+    """Keep repository source context within a predictable request budget."""
+    if len(content) <= MAX_CONTEXT_CHARS:
+        return content
+    return (
+        content[:MAX_CONTEXT_CHARS]
+        + "\n\n[Repository source truncated for context safety. "
+        "Use the summary/structure and focus on the files relevant to the task.]")
+
 
 def _build_prompt(prompt: str, context: dict[str, Any]) -> str:
     """Build one shared repository-aware prompt for both models."""
+    source = _limit_source_context(context.get("content", ""))
+
     return f"""You are modifying an existing software repository.
 
 Repository summary:
@@ -30,8 +47,8 @@ Repository summary:
 Repository structure:
 {context.get('structure', '')}
 
-Repository source:
-{context.get('content', '')}
+Repository source context:
+{source}
 
 Task:
 {prompt}
@@ -43,6 +60,7 @@ Guidelines:
 - Handle realistic errors and relevant edge cases.
 - Never include credentials, tokens, passwords, or secrets.
 - Keep the implementation focused and maintainable.
+- Do not invent files, APIs, dependencies, or functions that are not justified by the repository.
 
 Output format:
 - For a single-file change, return the code directly.
