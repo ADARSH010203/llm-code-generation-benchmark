@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import re
-from collections import Counter
 from html.parser import HTMLParser
 from typing import Any
 
@@ -19,7 +18,7 @@ FILE_BLOCK_PATTERN = re.compile(
 
 
 class _HTMLValidator(HTMLParser):
-    """Lightweight HTML parser used as a structural syntax check."""
+    """Lightweight HTML parser used for a structural check."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -32,9 +31,7 @@ class _HTMLValidator(HTMLParser):
 def _extract_python_code(code: str) -> str:
     cleaned = code.strip()
     if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines:
-            lines = lines[1:]
+        lines = cleaned.splitlines()[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         cleaned = "\n".join(lines)
@@ -42,13 +39,12 @@ def _extract_python_code(code: str) -> str:
 
 
 def _find_file_blocks(output: str) -> list[dict[str, str]]:
-    """Extract the structured multi-file format supported by the prompt."""
+    """Extract the multi-file format requested for larger tasks."""
     files: list[dict[str, str]] = []
     for match in FILE_BLOCK_PATTERN.finditer(output):
-        block = match.group("code").strip()
-        lines = block.splitlines()
-        language = lines[0].removeprefix("```").strip().lower() if lines else ""
-        source = "\n".join(lines[1:-1]) if len(lines) >= 2 else ""
+        block = match.group("code").strip().splitlines()
+        language = block[0].removeprefix("```").strip().lower() if block else ""
+        source = "\n".join(block[1:-1]) if len(block) >= 2 else ""
         files.append(
             {
                 "path": match.group("path").strip(),
@@ -60,9 +56,8 @@ def _find_file_blocks(output: str) -> list[dict[str, str]]:
 
 
 def _python_check(code: str) -> dict[str, Any]:
-    source = _extract_python_code(code)
     try:
-        tree = ast.parse(source)
+        tree = ast.parse(_extract_python_code(code))
         compile(tree, "<generated>", "exec")
         return {"passed": True, "message": "Python syntax and compilation checks passed."}
     except (SyntaxError, ValueError, TypeError) as exc:
@@ -85,20 +80,20 @@ def _secret_check(output: str) -> dict[str, Any]:
     matches = sum(len(pattern.findall(output)) for pattern in SECRET_PATTERNS)
     return {
         "passed": matches == 0,
-        "message": "No obvious hard-coded credential patterns detected."
-        if matches == 0
-        else "Potential hard-coded credential pattern detected.",
+        "message": (
+            "No obvious hard-coded credential patterns detected."
+            if matches == 0
+            else "Potential hard-coded credential pattern detected."
+        ),
     }
 
 
 def validate_generated_output(output: str) -> dict[str, Any]:
-    """Run deterministic validation without executing untrusted generated code."""
+    """Check generated output without executing untrusted model code."""
     output = output.strip()
-    lines = output.count("\n") + 1 if output else 0
     file_blocks = _find_file_blocks(output)
-
     checks: dict[str, Any] = {
-        "line_count": lines,
+        "line_count": output.count("\n") + 1 if output else 0,
         "file_count": len(file_blocks) or 1,
         "execution_verified": False,
         "tests_executed": False,
@@ -107,7 +102,7 @@ def validate_generated_output(output: str) -> dict[str, Any]:
     }
 
     if file_blocks:
-        language_results: list[dict[str, Any]] = []
+        results = []
         for file in file_blocks:
             suffix = file["path"].rsplit(".", 1)[-1].lower() if "." in file["path"] else ""
             if suffix == "py" or file["language"] in {"python", "py"}:
@@ -119,18 +114,15 @@ def validate_generated_output(output: str) -> dict[str, Any]:
                     "passed": None,
                     "message": "Static syntax check not configured for this file type.",
                 }
-            language_results.append({"path": file["path"], **result})
+            results.append({"path": file["path"], **result})
 
         checks["syntax"] = {
-            "passed": all(item["passed"] is not False for item in language_results),
-            "files": language_results,
+            "passed": all(item["passed"] is not False for item in results),
+            "files": results,
         }
     else:
-        python_markers = (
-            "def ", "import ", "from ", "class ", "if __name__", "async def ",
-        )
-        looks_like_python = any(marker in output for marker in python_markers)
-        if looks_like_python:
+        python_markers = ("def ", "import ", "from ", "class ", "async def ")
+        if any(marker in output for marker in python_markers):
             checks["syntax"] = _python_check(output)
 
     checks["evidence_level"] = _evidence_level(checks)
@@ -139,7 +131,6 @@ def validate_generated_output(output: str) -> dict[str, Any]:
 
 
 def _evidence_level(checks: dict[str, Any]) -> str:
-    """Describe how much deterministic evidence supports the generated output."""
     if checks["execution_verified"] or checks["tests_executed"]:
         return "high"
     if checks["syntax"].get("passed") is True and checks["security"]["passed"]:
@@ -148,12 +139,10 @@ def _evidence_level(checks: dict[str, Any]) -> str:
 
 
 def _validation_score(checks: dict[str, Any]) -> float:
-    """Return a deterministic validation signal, not a probability of correctness."""
+    """Return validation evidence, not a probability of correctness."""
     components = []
-
     syntax_passed = checks["syntax"].get("passed")
     if syntax_passed is not None:
         components.append(1.0 if syntax_passed else 0.0)
-
     components.append(1.0 if checks["security"]["passed"] else 0.0)
     return round(sum(components) / len(components), 2) if components else 0.0
