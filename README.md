@@ -1,14 +1,14 @@
 # LLM Code Generation Benchmark
 
-> A repository-aware benchmark that compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** on the same coding task, then evaluates both implementations with deterministic checks and **DeepEval**.
+> A repository-aware benchmark that compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** on the same coding task, then combines deterministic validation with **DeepEval** judging.
 
 ## What this project is
 
-This is not a generic coding chatbot. The project is designed to answer a practical software-engineering question:
+This is not a generic coding chatbot. It is an experiment framework for a practical software-engineering question:
 
 **Given the same existing codebase and the same requested change, which model produces the stronger implementation?**
 
-Both models receive the same repository context and task. Their outputs are streamed in parallel, validated without executing untrusted code, scored on three quality dimensions, and compared head-to-head.
+Both models receive the same repository/task inputs. Their outputs are streamed in parallel, checked for obvious deterministic failures, evaluated on code quality, and compared head-to-head.
 
 ## Workflow
 
@@ -20,6 +20,9 @@ Public GitHub Repository
           |
           v
  Summary + Structure + Sanitized Source
+          |
+          v
+   Task-aware File Ranking
           |
           +----------------------+
           |                      |
@@ -41,7 +44,10 @@ Public GitHub Repository
           |                          |
           +------------+-------------+
                        v
-               Pairwise Model Judge
+               Arena Pairwise Judge
+                       |
+                       v
+             Optional Docker Checks
                        |
                        v
                 Streamlit Dashboard
@@ -49,25 +55,26 @@ Public GitHub Repository
 
 ## Why repository-aware generation?
 
-Generating a correct standalone function is easier than making a change that fits an existing application. The benchmark therefore provides repository summary, structure, and source context to both models and asks them to preserve existing patterns instead of treating every task as greenfield development.
+A valid standalone function is not necessarily a good change to an existing codebase. The benchmark therefore uses repository summary, structure, and task-ranked source context so the models can follow existing architecture and conventions.
 
-For larger repositories, source context is bounded to a configurable request budget. This avoids unbounded prompts, but it also means that context truncation can hide relevant files. That is a known limitation; true file-level retrieval/ranking is a planned improvement.
+For large repositories, the source is no longer blindly dumped into the model prompt. A lightweight lexical ranker selects the most task-relevant file sections and keeps the request within a bounded context budget. This is intentionally simple and dependency-light; semantic embeddings/vector retrieval are a possible future upgrade.
 
-## What is evaluated?
+## Evaluation layers
 
-### 1. Deterministic validation
+### Deterministic validation
 
-The benchmark performs checks that do not depend on an LLM judge:
+The benchmark separates objective checks from subjective model judgment:
 
-- Python syntax/compilation checks where applicable
+- Python syntax/compile checks where applicable
 - Basic HTML parsing
 - Multi-file output detection
 - Obvious hard-coded credential pattern scanning
 - File and line counts
+- Optional restricted Docker checks for generated multi-file workspaces
 
-These checks are evidence, not a correctness guarantee.
+A passing syntax check does not prove functional correctness.
 
-### 2. DeepEval quality judgment
+### DeepEval quality judgment
 
 Three GEval metrics are used:
 
@@ -77,61 +84,88 @@ Three GEval metrics are used:
 | **Readability** | Naming, organization, formatting, documentation, and maintainability |
 | **Best Practices** | Error handling, security, efficiency, modularity, and configuration hygiene |
 
-DeepEval metrics are kept internally on their native **0–1** scale and shown in the UI on a **0–10** display scale. The current pass threshold is **0.70**. DeepEval documents its metric scores as 0–1, while GEval rubrics may still be written with 0–10 score ranges. citeturn899808search3turn899808search5
+DeepEval scores are kept in their native **0–1** range and shown in the dashboard on a **0–10** display scale. The current pass threshold is **0.70**.
 
-### 3. Pairwise comparison
+### Pairwise model comparison
 
-Because the project's main question is comparative, it also uses DeepEval's **ArenaGEval** to choose a winner between the two outputs. ArenaGEval is designed for pairwise model/prompt comparisons and uses blinded, randomized positioning to reduce simple position/verbosity bias. citeturn620285search0turn620285search6
+Because the benchmark's primary question is comparative, it also runs **ArenaGEval** to select a winner between Aya Expanse and Llama 4 Scout. Pairwise judging is used as a separate signal rather than replacing the individual quality scores.
 
-## Large project / website behavior
+## Large project and website behavior
 
-A 10-line Python change and a full web application should not be treated as the same benchmark task.
+A 10-line Python change and a full web application are different evaluation problems.
 
-For a small change, static validation plus semantic judging can provide useful feedback.
+For a focused change, static checks plus semantic judging can provide useful evidence.
 
-For a medium multi-file change, the models must return all required files and the benchmark checks each detected Python/HTML file where it has a validator.
+For a multi-file feature, the models are asked to return every changed file using a machine-readable `FILE:` format. The validator can inspect each supported file type.
 
-For a full website or production feature, semantic judging alone is insufficient. A serious evaluation should apply the generated patch in an isolated environment, install dependencies, run repository tests, build the application, and perform smoke/browser checks. This project intentionally does **not** execute arbitrary generated code inside the Streamlit process.
+For a full website or production feature, the benchmark can run the generated multi-file workspace through an optional Docker-based check. The sandbox disables network access, drops Linux capabilities, applies CPU/memory/process limits, and uses a temporary workspace. It does not automatically install dependencies or run arbitrary commands from the repository because those actions would weaken the security boundary.
 
-This is consistent with modern repository-level coding benchmarks such as SWE-bench, where generated patches are applied to real repositories and verified using repository tests in isolated environments. citeturn565269search4turn565269search7
+The correct long-term evaluation path is:
+
+```text
+Generate patch
+     |
+     v
+Apply to repository snapshot
+     |
+     v
+Static checks
+     |
+     v
+Isolated tests / build
+     |
+     v
+Smoke / browser checks
+     |
+     v
+Quality + latency + cost + failure metrics
+```
 
 ## Security model
 
-Repository code is untrusted input. Before model use, obvious credential patterns are redacted from ingested source. Generated output is never executed by this application.
+Repository content is untrusted input. Before model use, the ingestion layer redacts obvious credential patterns and the generation prompt explicitly treats repository comments, documentation, and strings as data rather than instructions.
 
-Keep provider credentials in local environment files or deployment secret stores. Never commit real values. The repository's `.env.example` documents the required variables without containing credentials.
+Generated paths are checked to prevent `..` traversal before they are written to the sandbox. Generated code is not executed by the main Streamlit process.
 
-Credentials that were previously exposed in the old repository state were revoked/rotated and the files were removed from the current branch. Removing a file from the latest commit does not erase it from older Git objects, so a history rewrite is still recommended if the repository needs to be treated as historically clean.
+Previously exposed credentials were revoked/rotated and the corresponding files were removed from the current branch. Removing a file from the latest commit does not erase old Git objects, so a history rewrite is still recommended when historical secrecy matters.
 
-## Evidence and limitations
+## Reproducible benchmark tasks
 
-LLM-as-a-judge is useful but not ground truth. DeepEval itself recommends choosing evaluation techniques based on the task shape, and pairwise judging is specifically useful when the question is which model/version is better. citeturn565269search0turn620285search6
+`benchmark_tasks.json` contains a starter task set covering bug fixes, features, refactors, security, frontend work, API changes, and multi-file changes.
 
-Known limitations:
+For a meaningful model comparison, run each task multiple times and report at least:
 
-1. **Context truncation:** very large repositories can exceed the configured source budget and hide relevant files.
-2. **No arbitrary execution:** current evaluation does not safely run generated code, install generated dependencies, or run browser tests.
-3. **Static language coverage:** syntax checks are currently limited to supported file types; JavaScript/TypeScript/CSS require stronger validators.
-4. **LLM judge variance:** semantic scores can change between runs and should not be treated as objective truth.
-5. **Single-run noise:** one task and one generation are not enough to establish a general model ranking.
-6. **Provider effects:** latency, rate limits, model revisions, and provider behavior can influence results.
-7. **Task quality matters:** broken or ambiguous coding tasks can produce misleading benchmark conclusions. Recent audits of software-engineering benchmarks have shown that task quality itself can materially affect evaluation validity. citeturn565269search11
+- mean and median quality scores
+- pass/fail rate
+- pairwise win rate
+- syntax/test/build failure rate
+- latency
+- token usage and cost when provider data is available
+
+One task and one run are not enough to establish that one model is generally better.
+
+## Known limitations
+
+1. **Retrieval is lexical:** filename and token overlap can still miss semantically related files.
+2. **Context can still be incomplete:** a large repository may contain important dependencies outside the selected context.
+3. **Sandbox is conservative:** it does not install arbitrary dependencies or execute repository-defined commands by default.
+4. **Language coverage is incomplete:** Python and basic HTML receive deterministic parsing; JavaScript/TypeScript/CSS need stronger project-aware validation.
+5. **LLM judge variance:** semantic scores may vary between runs.
+6. **Task quality matters:** ambiguous tasks can produce misleading benchmark conclusions.
+7. **Provider effects matter:** model revisions, rate limits, latency, and provider behavior can affect comparisons.
 
 ## Recommended benchmark ladder
 
 ```text
 Level 1  Focused function / bug fix
-         -> static checks + DeepEval
+         -> retrieval + static checks + DeepEval
 
 Level 2  Multi-file feature
-         -> file-aware validation + tests when available
+         -> ranked context + multi-file output + validation
 
 Level 3  Full application / website
-         -> isolated patch application
-         -> dependency install
-         -> tests + build
-         -> smoke/browser checks
-         -> resource + failure metrics
+         -> patch application + isolated test/build + smoke/browser checks
+         -> repeated trials + latency/cost/failure reporting
 ```
 
 ## Setup
@@ -163,11 +197,11 @@ pip install -r requirements.txt
 
 ### 3. Configure credentials
 
-Copy `.env.example` to `.env.local` and fill in the provider credentials locally.
+Copy `.env.example` to `.env` and fill in your provider credentials locally.
 
-The two generation models use their respective provider keys. DeepEval also requires an evaluation-model credential; by default this project documents an OpenAI-compatible evaluator through `OPENAI_API_KEY` and `DEEPEVAL_MODEL`.
+The generation models use the provider-specific keys. DeepEval can use the configured evaluation model through its supported environment settings; this project also accepts `DEEPEVAL_MODEL` when you want to select it explicitly.
 
-Do not commit `.env`, `.env.local`, or real credentials.
+Never commit real credentials.
 
 ### 4. Run
 
@@ -181,10 +215,11 @@ streamlit run app.py
 2. Click **Ingest Repository**.
 3. Describe one concrete coding change.
 4. Compare Aya Expanse and Llama 4 Scout outputs.
-5. For multi-file changes, review every returned `FILE:` block.
-6. Optionally provide a reference implementation.
+5. Review the task-ranked files shown in the evaluation section.
+6. Optionally provide reference code.
 7. Click **Evaluate Latest Generation**.
-8. Review deterministic evidence, individual scores, and the pairwise winner.
+8. For multi-file output, use **Run Isolated Checks** to run available deterministic checks in Docker.
+9. Compare individual scores, evidence level, and the pairwise winner.
 
 ## Project structure
 
@@ -193,9 +228,13 @@ streamlit run app.py
 ├── app.py
 ├── model_service.py
 ├── code_ingestion.py
+├── context_retrieval.py
 ├── code_validation.py
 ├── code_evaluation.py
+├── sandbox_runner.py
+├── benchmark_tasks.json
 ├── BENCHMARK.md
+├── tests/
 ├── requirements.txt
 ├── pyproject.toml
 ├── .python-version
@@ -214,19 +253,19 @@ streamlit run app.py
 - DeepEval / GEval / ArenaGEval
 - Pandas
 - Plotly
+- Docker (optional sandbox checks)
 - Cohere Aya Expanse
 - Meta Llama 4 Scout
 
 ## Roadmap
 
-- Replace simple truncation with file-aware retrieval/ranking for large repositories.
-- Add deterministic JavaScript/TypeScript/CSS validation.
-- Add isolated execution for trusted benchmark tasks only.
-- Run a fixed dataset of coding tasks with multiple trials.
-- Track latency, token usage, failures, and cost.
-- Add test/build/browser success as first-class benchmark outcomes.
-- Export reproducible JSON/CSV benchmark reports.
-- Add CI regression evaluations.
+- Improve retrieval with semantic embeddings and dependency-aware file selection.
+- Add deterministic JavaScript/TypeScript/CSS project validation.
+- Add repository test discovery without blindly executing untrusted scripts.
+- Add browser-level smoke tests in an isolated environment.
+- Track latency, token usage, failures, and cost per model.
+- Run the full task suite repeatedly and export JSON/CSV reports.
+- Add CI regression checks for benchmark protocol code.
 
 ## License
 
