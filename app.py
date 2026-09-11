@@ -1,4 +1,6 @@
-"""Streamlit interface for comparing LLM code generation."""
+"""Streamlit interface for repository-aware LLM code benchmarking."""
+
+from __future__ import annotations
 
 import asyncio
 from typing import Any
@@ -8,7 +10,7 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
-from code_evaluation import evaluate_code
+from code_evaluation import compare_outputs, evaluate_code
 from code_ingestion import ingest_github_repo
 from model_service import get_parallel_responses
 
@@ -27,7 +29,7 @@ MODEL_LABELS = {
 
 
 def initialize_state() -> None:
-    """Create the state used across Streamlit reruns."""
+    """Create values that need to survive Streamlit reruns."""
     defaults: dict[str, Any] = {
         "chat_history": [],
         "context": None,
@@ -35,33 +37,25 @@ def initialize_state() -> None:
         "latest_task": "",
         "last_generated_code": {"aya_expanse": None, "llama_scout": None},
         "evaluation_results": {"aya_expanse": None, "llama_scout": None},
+        "pairwise_result": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-def display_generated_output(text: str) -> None:
-    """Render model output as text because it may contain multiple files."""
-    st.code(text, language="text")
-
-
 async def consume_stream(stream: Any, placeholder: Any) -> str:
-    """Consume a model stream while updating the UI."""
+    """Consume a model stream and update the visible output incrementally."""
     output = ""
     async for chunk in stream:
         output += chunk
-        display_text = output.strip()
-        placeholder.code(display_text, language="text")
+        placeholder.code(output.strip(), language="text")
     return output.strip()
 
 
 async def generate_code(task: str) -> tuple[str, str]:
-    """Generate the same task concurrently with both benchmark models."""
-    llama_stream, aya_stream = await get_parallel_responses(
-        task,
-        st.session_state.context,
-    )
+    """Run both model generations concurrently with identical inputs."""
+    llama_stream, aya_stream = await get_parallel_responses(task, st.session_state.context)
 
     aya_column, llama_column = st.columns(2)
     with aya_column:
@@ -90,14 +84,22 @@ def show_generated_history() -> None:
             aya_column, llama_column = st.columns(2)
             with aya_column:
                 st.subheader(MODEL_LABELS["aya_expanse"])
-                display_generated_output(message["aya_response"])
+                st.code(message["aya_response"], language="text")
             with llama_column:
                 st.subheader(MODEL_LABELS["llama_scout"])
-                display_generated_output(message["llama_response"])
+                st.code(message["llama_response"], language="text")
+
+
+def _repository_eval_context() -> str:
+    """Return bounded context for the evaluator without duplicating the full prompt."""
+    context = st.session_state.context or {}
+    summary = context.get("summary", "")
+    structure = context.get("structure", "")
+    return f"Summary:\n{summary}\n\nStructure:\n{structure}"
 
 
 def evaluate_latest() -> None:
-    """Evaluate the latest pair of generated outputs."""
+    """Run per-model evaluation and a direct pairwise comparison."""
     outputs = st.session_state.last_generated_code
     if not outputs["aya_expanse"] or not outputs["llama_scout"]:
         st.error("Generate code with both models before evaluating it.")
@@ -106,17 +108,25 @@ def evaluate_latest() -> None:
         st.error("The latest coding task is missing.")
         return
 
-    with st.spinner("Running validation and DeepEval..."):
+    with st.spinner("Running validation and model comparison..."):
         for model_name, code in outputs.items():
             st.session_state.evaluation_results[model_name] = evaluate_code(
                 generated_code=code,
                 task=st.session_state.latest_task,
+                repository_context=_repository_eval_context(),
                 reference_code=st.session_state.reference_code or None,
             )
 
+        st.session_state.pairwise_result = compare_outputs(
+            task=st.session_state.latest_task,
+            aya_output=outputs["aya_expanse"],
+            llama_output=outputs["llama_scout"],
+            reference_code=st.session_state.reference_code or None,
+        )
+
 
 def build_score_dataframe() -> pd.DataFrame:
-    """Build the user-facing 0–10 comparison table."""
+    """Build the user-facing 0–10 score table."""
     rows = []
     for metric_name in ("correctness", "readability", "best_practices"):
         rows.append(
@@ -146,15 +156,14 @@ def build_score_dataframe() -> pd.DataFrame:
 
 
 def show_validation(result: dict[str, Any]) -> None:
-    """Show deterministic evidence separately from the LLM-judge score."""
+    """Show static evidence separately from subjective LLM judging."""
     validation = result.get("validation", {})
     if not validation:
         return
 
     syntax = validation.get("syntax", {})
     security = validation.get("security", {})
-
-    st.markdown("**Deterministic checks**")
+    st.markdown("**Deterministic validation**")
     st.write(
         {
             "Files detected": validation.get("file_count", 1),
@@ -166,6 +175,8 @@ def show_validation(result: dict[str, Any]) -> None:
             "Evidence level": validation.get("evidence_level", "low"),
         }
     )
+    if validation.get("redactions", 0):
+        st.caption("Some repository credentials were redacted before model evaluation.")
 
     if security.get("message"):
         st.caption(security["message"])
@@ -174,24 +185,21 @@ def show_validation(result: dict[str, Any]) -> None:
 
 
 def show_evaluation_results() -> None:
-    """Render model scores, evidence, and evaluator reasoning."""
+    """Render score, validation evidence, and pairwise winner."""
     results = st.session_state.evaluation_results
     if not results["aya_expanse"] or not results["llama_scout"]:
         return
 
     st.divider()
     st.header("Evaluation Results")
-    st.caption(
-        "DeepEval scores are normalized from 0–1 internally and shown here on a 0–10 scale."
-    )
+    st.caption("DeepEval keeps metric scores in 0–1; this dashboard displays them on a 0–10 scale.")
 
     if results["aya_expanse"].get("error") or results["llama_scout"].get("error"):
-        st.error("One or more evaluations failed. Check the model details below.")
+        st.error("One or more evaluations failed. Check the details below.")
         return
 
     result_df = build_score_dataframe()
     chart_df = result_df.melt(id_vars="Metric", var_name="Model", value_name="Score")
-
     fig = px.bar(
         chart_df,
         x="Metric",
@@ -204,31 +212,32 @@ def show_evaluation_results() -> None:
     )
     fig.update_layout(height=450)
     st.plotly_chart(fig, use_container_width=True)
-
     st.dataframe(result_df, hide_index=True, use_container_width=True)
+
+    pairwise = st.session_state.pairwise_result or {}
+    if pairwise.get("winner"):
+        st.success(f"Pairwise judge winner: **{pairwise['winner']}**")
+        st.caption(pairwise.get("reason", "No pairwise reasoning returned."))
+    else:
+        st.info(pairwise.get("reason", "Pairwise comparison is unavailable."))
 
     for model_name, result in results.items():
         st.subheader(MODEL_LABELS[model_name])
         show_validation(result)
 
-        details = result.get("detailed_metrics", {})
         reasoning_rows = [
             {
                 "Metric": metric.replace("_", " ").title(),
                 "Score": values["score_10"],
                 "Reasoning": values["reason"],
             }
-            for metric, values in details.items()
+            for metric, values in result.get("detailed_metrics", {}).items()
         ]
-        st.dataframe(
-            pd.DataFrame(reasoning_rows),
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.dataframe(pd.DataFrame(reasoning_rows), hide_index=True, use_container_width=True)
 
         st.caption(result.get("confidence_note", "No confidence note available."))
         status = "PASS" if result.get("passed") else "FAIL"
-        st.caption(f"LLM-judge status: **{status}** at a 0.70 DeepEval threshold.")
+        st.caption(f"LLM-judge status: **{status}** at a 0.70 native DeepEval threshold.")
 
 
 initialize_state()
@@ -241,19 +250,16 @@ with st.sidebar:
     )
 
     if st.button("Ingest Repository", use_container_width=True):
-        if not github_repo.strip():
-            st.error("Enter a GitHub repository URL first.")
-        else:
+        try:
             with st.spinner("Reading repository..."):
-                try:
-                    st.session_state.context = ingest_github_repo(github_repo)
-                    st.session_state.evaluation_results = {
-                        "aya_expanse": None,
-                        "llama_scout": None,
-                    }
-                    st.success("Repository context is ready.")
-                except Exception as exc:
-                    st.error(str(exc))
+                st.session_state.context = ingest_github_repo(github_repo)
+            st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
+            st.session_state.pairwise_result = None
+            st.success("Repository context is ready.")
+            if st.session_state.context.get("redactions", 0):
+                st.warning("Potential credentials were redacted from repository context before model use.")
+        except Exception as exc:
+            st.error(str(exc))
 
     st.divider()
     st.header("Evaluation")
@@ -261,19 +267,20 @@ with st.sidebar:
         "Reference implementation (optional)",
         height=180,
         key="reference_code",
-        help="Reference code gives the correctness judge a stronger comparison point.",
+        help="Reference code gives the correctness judge stronger behavioral evidence.",
     )
 
 st.title("LLM Code Generation Benchmark")
 st.write(
-    "Compare two LLMs on the same repository-aware coding task, then separate "
-    "deterministic validation evidence from LLM-based quality judgment."
+    "Compare Aya Expanse and Llama 4 Scout on the same repository-aware coding task, "
+    "then separate static evidence from LLM-based quality judgment."
 )
 
 if st.session_state.context:
+    context = st.session_state.context
     with st.expander("Repository context", expanded=False):
-        st.markdown(st.session_state.context.get("summary", "No summary available."))
-        st.code(st.session_state.context.get("structure", ""), language="text")
+        st.markdown(context.get("summary", "No summary available."))
+        st.code(context.get("structure", ""), language="text")
 else:
     st.info("Ingest a GitHub repository from the sidebar before generating code.")
 
@@ -296,6 +303,8 @@ if prompt := st.chat_input("Describe the code change you want..."):
                 "aya_expanse": aya_code,
                 "llama_scout": llama_code,
             }
+            st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
+            st.session_state.pairwise_result = None
             st.session_state.chat_history.append(
                 {
                     "role": "assistant",
@@ -304,10 +313,6 @@ if prompt := st.chat_input("Describe the code change you want..."):
                     "llama_response": llama_code,
                 }
             )
-            st.session_state.evaluation_results = {
-                "aya_expanse": None,
-                "llama_scout": None,
-            }
         except Exception as exc:
             st.error(f"Code generation failed: {exc}")
 
