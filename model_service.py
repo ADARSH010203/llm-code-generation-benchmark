@@ -1,5 +1,7 @@
 """Model access and parallel streaming for the benchmark."""
 
+from __future__ import annotations
+
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,27 +21,42 @@ MODEL_CONFIG = {
     },
 }
 
-# Prevent very large repositories from being copied into every model request.
-# Full retrieval/ranking is a future improvement; this guard keeps the current
-# workflow predictable and makes the limitation explicit.
-MAX_CONTEXT_CHARS = 80_000
+# These limits keep a single request from growing without bound. They are
+# deliberately configurable so the benchmark can be tuned for different
+# providers and model context windows.
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "100000"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "6000"))
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT", "90"))
+RETRIES = int(os.getenv("LLM_RETRIES", "2"))
 
 
-def _limit_source_context(content: str) -> str:
-    """Keep repository source context within a predictable request budget."""
+def _limit_source_context(content: str) -> tuple[str, bool]:
+    """Bound repository source included in the model prompt."""
     if len(content) <= MAX_CONTEXT_CHARS:
-        return content
-    return (
-        content[:MAX_CONTEXT_CHARS]
-        + "\n\n[Repository source truncated for context safety. "
-        "Use the summary/structure and focus on the files relevant to the task.]")
+        return content, False
+
+    # Keep both the beginning and end because repository summaries often put
+    # project-level files first, while package configuration may appear later.
+    head = int(MAX_CONTEXT_CHARS * 0.75)
+    tail = MAX_CONTEXT_CHARS - head
+    clipped = (
+        content[:head]
+        + "\n\n[... repository source truncated for context limits ...]\n\n"
+        + content[-tail:]
+    )
+    return clipped, True
 
 
 def _build_prompt(prompt: str, context: dict[str, Any]) -> str:
-    """Build one shared repository-aware prompt for both models."""
-    source = _limit_source_context(context.get("content", ""))
+    """Build the same repository-aware prompt for both models."""
+    source, truncated = _limit_source_context(context.get("content", ""))
+    truncation_note = (
+        "The source context is truncated. Do not invent unseen APIs; state only changes you can justify from the available context."
+        if truncated
+        else "The supplied source context is within the request budget."
+    )
 
-    return f"""You are modifying an existing software repository.
+    return f"""You are making a code change in an existing software repository.
 
 Repository summary:
 {context.get('summary', '')}
@@ -51,33 +68,36 @@ Repository source context:
 {source}
 
 Task:
-{prompt}
+{prompt.strip()}
 
-Guidelines:
-- Follow the repository's existing architecture and coding conventions.
-- Preserve existing behavior unless the task requires a change.
+Context note:
+{truncation_note}
+
+Engineering rules:
+- Follow the repository's existing architecture and conventions.
 - Reuse existing modules and patterns before creating new abstractions.
+- Preserve unrelated behavior.
 - Handle realistic errors and relevant edge cases.
-- Never include credentials, tokens, passwords, or secrets.
-- Keep the implementation focused and maintainable.
-- Do not invent files, APIs, dependencies, or functions that are not justified by the repository.
+- Never include credentials, tokens, passwords, or other secrets.
+- Do not invent dependencies, APIs, files, or functions without evidence.
+- Prefer the smallest maintainable change that fully solves the task.
 
 Output format:
-- For a single-file change, return the code directly.
-- For a multi-file change (for example, a website), return each file using this format:
+- For one file, return the implementation for that file.
+- For multiple files, return every changed file using exactly:
 
 FILE: path/to/file.ext
 ```language
 file contents
 ```
 
-Repeat the FILE block for every file that must be created or changed.
-- Do not add explanations outside the code/file blocks.
+- Do not omit a changed file needed for the feature.
+- Do not add prose outside the code/file blocks.
 """
 
 
 def _api_key_for(model_name: str) -> str:
-    """Read the API key required by the selected model."""
+    """Read the provider credential for a configured benchmark model."""
     config = MODEL_CONFIG.get(model_name)
     if config is None:
         raise ValueError(f"Unsupported model: {model_name}")
@@ -104,12 +124,17 @@ async def stream_model_response(
         model=config["model"],
         messages=[{"role": "user", "content": _build_prompt(prompt, context)}],
         api_key=_api_key_for(model_name),
-        max_tokens=4000,
+        max_tokens=MAX_OUTPUT_TOKENS,
         stream=True,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        num_retries=RETRIES,
     )
 
     async for chunk in response:
-        content = getattr(chunk.choices[0].delta, "content", None)
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        content = getattr(choices[0].delta, "content", None)
         if content:
             yield content
 
@@ -118,7 +143,7 @@ async def get_parallel_responses(
     prompt: str,
     context: dict[str, Any],
 ) -> tuple[AsyncIterator[str], AsyncIterator[str]]:
-    """Create independent streams so both models receive the same task."""
+    """Create independent streams for both benchmark models."""
     return (
         stream_model_response("llama_scout", prompt, context),
         stream_model_response("aya_expanse", prompt, context),
