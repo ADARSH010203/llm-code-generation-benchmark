@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 
 from code_evaluation import compare_outputs, evaluate_code
 from code_ingestion import ingest_github_repo
+from context_retrieval import build_retrieved_context
 from model_service import get_parallel_responses
+from sandbox_runner import clone_and_run
 
 load_dotenv()
 
@@ -38,6 +40,7 @@ def initialize_state() -> None:
         "last_generated_code": {"aya_expanse": None, "llama_scout": None},
         "evaluation_results": {"aya_expanse": None, "llama_scout": None},
         "pairwise_result": None,
+        "execution_results": {"aya_expanse": None, "llama_scout": None},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -91,11 +94,9 @@ def show_generated_history() -> None:
 
 
 def _repository_eval_context() -> str:
-    """Return bounded context for the evaluator without duplicating the full prompt."""
+    """Return metadata the evaluator can use to reason about repository fit."""
     context = st.session_state.context or {}
-    summary = context.get("summary", "")
-    structure = context.get("structure", "")
-    return f"Summary:\n{summary}\n\nStructure:\n{structure}"
+    return f"Summary:\n{context.get('summary', '')}\n\nStructure:\n{context.get('structure', '')}"
 
 
 def evaluate_latest() -> None:
@@ -115,6 +116,7 @@ def evaluate_latest() -> None:
                 task=st.session_state.latest_task,
                 repository_context=_repository_eval_context(),
                 reference_code=st.session_state.reference_code or None,
+                execution_result=st.session_state.execution_results.get(model_name),
             )
 
         st.session_state.pairwise_result = compare_outputs(
@@ -123,6 +125,29 @@ def evaluate_latest() -> None:
             llama_output=outputs["llama_scout"],
             reference_code=st.session_state.reference_code or None,
         )
+
+
+def run_sandbox_checks() -> None:
+    """Run generated multi-file outputs against a fresh clone in isolation."""
+    outputs = st.session_state.last_generated_code
+    if not outputs["aya_expanse"] or not outputs["llama_scout"]:
+        st.error("Generate code from both models before running sandbox checks.")
+        return
+    if not st.session_state.context:
+        st.error("Ingest a repository before running sandbox checks.")
+        return
+
+    repo_url = st.session_state.get("github_repo", "")
+    if not repo_url:
+        st.error("Enter the GitHub repository URL in the sidebar first.")
+        return
+
+    with st.spinner("Cloning the repository and running isolated checks..."):
+        for model_name, output in outputs.items():
+            st.session_state.execution_results[model_name] = clone_and_run(repo_url, output)
+
+    # Refresh evaluation so execution evidence affects the final verdict.
+    evaluate_latest()
 
 
 def build_score_dataframe() -> pd.DataFrame:
@@ -156,43 +181,53 @@ def build_score_dataframe() -> pd.DataFrame:
 
 
 def show_validation(result: dict[str, Any]) -> None:
-    """Show static evidence separately from subjective LLM judging."""
+    """Show deterministic evidence separately from LLM judging."""
     validation = result.get("validation", {})
+    execution = result.get("execution") or {}
     if not validation:
         return
 
     syntax = validation.get("syntax", {})
     security = validation.get("security", {})
-    st.markdown("**Deterministic validation**")
+    st.markdown("**Deterministic evidence**")
     st.write(
         {
             "Files detected": validation.get("file_count", 1),
             "Lines": validation.get("line_count", 0),
             "Syntax": syntax.get("passed"),
             "Security scan": security.get("passed"),
-            "Execution verified": validation.get("execution_verified", False),
-            "Tests executed": validation.get("tests_executed", False),
-            "Evidence level": validation.get("evidence_level", "low"),
+            "Sandbox available": execution.get("available", False),
+            "Sandbox executed": execution.get("executed", False),
+            "Sandbox passed": execution.get("passed"),
+            "Evidence level": "high" if execution.get("executed") else validation.get("evidence_level", "low"),
         }
     )
-    if validation.get("redactions", 0):
-        st.caption("Some repository credentials were redacted before model evaluation.")
 
+    if validation.get("redactions", 0):
+        st.caption("Potential credentials were redacted from repository context before model use.")
     if security.get("message"):
         st.caption(security["message"])
     if syntax.get("message") and syntax.get("passed") is not None:
         st.caption(syntax["message"])
+    if execution.get("message"):
+        st.caption(execution["message"])
+
+    for command in execution.get("commands", []):
+        label = "PASS" if command.get("passed") else "FAIL"
+        st.caption(f"{label}: {' '.join(command.get('command', []))}")
+        if command.get("stderr"):
+            st.code(command["stderr"], language="text")
 
 
 def show_evaluation_results() -> None:
-    """Render score, validation evidence, and pairwise winner."""
+    """Render scores, validation evidence, pairwise result, and retrieval info."""
     results = st.session_state.evaluation_results
     if not results["aya_expanse"] or not results["llama_scout"]:
         return
 
     st.divider()
     st.header("Evaluation Results")
-    st.caption("DeepEval keeps metric scores in 0–1; this dashboard displays them on a 0–10 scale.")
+    st.caption("DeepEval uses a native 0–1 score; this dashboard displays the same score on a 0–10 scale.")
 
     if results["aya_expanse"].get("error") or results["llama_scout"].get("error"):
         st.error("One or more evaluations failed. Check the details below.")
@@ -219,7 +254,22 @@ def show_evaluation_results() -> None:
         st.success(f"Pairwise judge winner: **{pairwise['winner']}**")
         st.caption(pairwise.get("reason", "No pairwise reasoning returned."))
     else:
-        st.info(pairwise.get("reason", "Pairwise comparison is unavailable."))
+        st.info(pairwise.get("reason", "Pairwise comparison unavailable."))
+
+    if st.session_state.latest_task and st.session_state.context:
+        retrieved = build_retrieved_context(
+            st.session_state.context.get("content", ""),
+            st.session_state.latest_task,
+        )
+        with st.expander("Retrieval used for generation"):
+            st.write(
+                {
+                    "candidate_files": retrieved["candidate_files"],
+                    "selected_files": len(retrieved["files"]),
+                    "selected_context_chars": retrieved["total_chars"],
+                }
+            )
+            st.dataframe(pd.DataFrame(retrieved["files"]), hide_index=True, use_container_width=True)
 
     for model_name, result in results.items():
         st.subheader(MODEL_LABELS[model_name])
@@ -237,7 +287,7 @@ def show_evaluation_results() -> None:
 
         st.caption(result.get("confidence_note", "No confidence note available."))
         status = "PASS" if result.get("passed") else "FAIL"
-        st.caption(f"LLM-judge status: **{status}** at a 0.70 native DeepEval threshold.")
+        st.caption(f"Final status: **{status}** — LLM threshold 0.70 plus deterministic security/execution gates.")
 
 
 initialize_state()
@@ -247,6 +297,7 @@ with st.sidebar:
     github_repo = st.text_input(
         "GitHub repository URL",
         placeholder="https://github.com/username/repository",
+        key="github_repo",
     )
 
     if st.button("Ingest Repository", use_container_width=True):
@@ -255,9 +306,10 @@ with st.sidebar:
                 st.session_state.context = ingest_github_repo(github_repo)
             st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
             st.session_state.pairwise_result = None
+            st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
             st.success("Repository context is ready.")
             if st.session_state.context.get("redactions", 0):
-                st.warning("Potential credentials were redacted from repository context before model use.")
+                st.warning("Potential credentials were redacted before model use.")
         except Exception as exc:
             st.error(str(exc))
 
@@ -272,15 +324,14 @@ with st.sidebar:
 
 st.title("LLM Code Generation Benchmark")
 st.write(
-    "Compare Aya Expanse and Llama 4 Scout on the same repository-aware coding task, "
-    "then separate static evidence from LLM-based quality judgment."
+    "Compare Aya Expanse and Llama 4 Scout on the same repository-aware task, "
+    "then combine LLM judging with deterministic validation evidence."
 )
 
 if st.session_state.context:
-    context = st.session_state.context
     with st.expander("Repository context", expanded=False):
-        st.markdown(context.get("summary", "No summary available."))
-        st.code(context.get("structure", ""), language="text")
+        st.markdown(st.session_state.context.get("summary", "No summary available."))
+        st.code(st.session_state.context.get("structure", ""), language="text")
 else:
     st.info("Ingest a GitHub repository from the sidebar before generating code.")
 
@@ -305,6 +356,7 @@ if prompt := st.chat_input("Describe the code change you want..."):
             }
             st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
             st.session_state.pairwise_result = None
+            st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
             st.session_state.chat_history.append(
                 {
                     "role": "assistant",
@@ -317,7 +369,12 @@ if prompt := st.chat_input("Describe the code change you want..."):
             st.error(f"Code generation failed: {exc}")
 
 st.divider()
-if st.button("Evaluate Latest Generation"):
-    evaluate_latest()
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("Run Isolated Checks"):
+        run_sandbox_checks()
+with col2:
+    if st.button("Evaluate Latest Generation"):
+        evaluate_latest()
 
 show_evaluation_results()
