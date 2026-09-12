@@ -10,11 +10,13 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
+from benchmark.agent import inspect_candidate
 from benchmark.evaluation import compare_outputs, evaluate_code
 from benchmark.ingestion import ingest_github_repo
-from benchmark.retrieval import build_retrieved_context
 from benchmark.model_service import get_parallel_responses
+from benchmark.retrieval import build_retrieved_context
 from benchmark.sandbox import clone_and_run
+from benchmark.tasks import load_tasks
 
 load_dotenv()
 
@@ -25,11 +27,15 @@ MODEL_LABELS = {"aya_expanse": "Cohere Aya Expanse", "llama_scout": "Meta Llama 
 
 def initialize_state() -> None:
     defaults: dict[str, Any] = {
-        "chat_history": [], "context": None, "reference_code": "", "latest_task": "",
+        "chat_history": [],
+        "context": None,
+        "reference_code": "",
+        "latest_task": "",
         "last_generated_code": {"aya_expanse": None, "llama_scout": None},
         "evaluation_results": {"aya_expanse": None, "llama_scout": None},
         "pairwise_result": None,
         "execution_results": {"aya_expanse": None, "llama_scout": None},
+        "agent_steps": {"aya_expanse": [], "llama_scout": []},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -82,6 +88,13 @@ def _repository_eval_context() -> str:
     return f"Summary:\n{context.get('summary', '')}\n\nStructure:\n{context.get('structure', '')}"
 
 
+def reset_run_state() -> None:
+    st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
+    st.session_state.pairwise_result = None
+    st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
+    st.session_state.agent_steps = {"aya_expanse": [], "llama_scout": []}
+
+
 def evaluate_latest() -> None:
     outputs = st.session_state.last_generated_code
     if not outputs["aya_expanse"] or not outputs["llama_scout"]:
@@ -117,6 +130,44 @@ def run_sandbox_checks() -> None:
         for model_name, output in outputs.items():
             st.session_state.execution_results[model_name] = clone_and_run(repo_url, output)
     evaluate_latest()
+
+
+def run_agent_evaluation() -> None:
+    """Run the visible agent trajectory: validate -> sandbox -> judge."""
+    outputs = st.session_state.last_generated_code
+    repo_url = st.session_state.get("github_repo", "")
+    if not outputs["aya_expanse"] or not outputs["llama_scout"]:
+        st.error("Generate code with both models before running agent evaluation.")
+        return
+    if not repo_url:
+        st.error("Enter a GitHub repository URL before running agent evaluation.")
+        return
+
+    with st.spinner("Running agent-style evaluation: validate → sandbox → judge..."):
+        for model_name, output in outputs.items():
+            candidate_step = inspect_candidate(output)
+            execution = clone_and_run(repo_url, output)
+            result = evaluate_code(
+                generated_code=output,
+                task=st.session_state.latest_task,
+                repository_context=_repository_eval_context(),
+                reference_code=st.session_state.reference_code or None,
+                execution_result=execution,
+            )
+            st.session_state.agent_steps[model_name] = [
+                candidate_step,
+                {"name": "isolated_execution", "status": "passed" if execution.get("passed") is True else "failed" if execution.get("passed") is False else "skipped", "details": execution},
+                {"name": "semantic_evaluation", "status": "passed" if result.get("passed") else "failed", "details": {"score_10": result.get("overall_score_10")}},
+            ]
+            st.session_state.execution_results[model_name] = execution
+            st.session_state.evaluation_results[model_name] = result
+
+        st.session_state.pairwise_result = compare_outputs(
+            task=st.session_state.latest_task,
+            aya_output=outputs["aya_expanse"],
+            llama_output=outputs["llama_scout"],
+            reference_code=st.session_state.reference_code or None,
+        )
 
 
 def build_score_dataframe() -> pd.DataFrame:
@@ -159,6 +210,20 @@ def show_validation(result: dict[str, Any]) -> None:
         st.caption(syntax["message"])
     if execution.get("message"):
         st.caption(execution["message"])
+
+
+def show_agent_trace() -> None:
+    steps = st.session_state.agent_steps
+    if not any(steps.values()):
+        return
+    st.subheader("Agent Evaluation Trace")
+    st.caption("Each candidate follows the same observable evaluation path: validation → isolated execution → semantic judge.")
+    for model_name, model_steps in steps.items():
+        st.markdown(f"**{MODEL_LABELS[model_name]}**")
+        rows = []
+        for step in model_steps:
+            rows.append({"Step": step.name if hasattr(step, "name") else step["name"], "Status": step.status if hasattr(step, "status") else step["status"]})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 def show_evaluation_results() -> None:
@@ -204,6 +269,8 @@ def show_evaluation_results() -> None:
         status = "PASS" if result.get("passed") else "FAIL"
         st.caption(f"Final status: **{status}** — LLM threshold 0.70 plus deterministic gates.")
 
+    show_agent_trace()
+
 
 initialize_state()
 
@@ -215,19 +282,27 @@ with st.sidebar:
         try:
             with st.spinner("Reading repository..."):
                 st.session_state.context = ingest_github_repo(st.session_state.github_repo)
-            st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
-            st.session_state.pairwise_result = None
-            st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
+            reset_run_state()
             st.success("Repository context is ready.")
         except Exception as exc:
             st.error(str(exc))
 
     st.divider()
+    st.header("Benchmark Task")
+    try:
+        benchmark_tasks = load_tasks()
+        task_options = {f"{task.id} · {task.category}": task.task for task in benchmark_tasks}
+        selected_task = st.selectbox("Use a reproducible task", ["Custom task", *task_options.keys()])
+        if selected_task != "Custom task":
+            st.session_state.latest_task = task_options[selected_task]
+    except Exception as exc:
+        st.warning(f"Benchmark tasks unavailable: {exc}")
+
     st.header("Evaluation")
     st.text_area("Reference implementation (optional)", height=180, key="reference_code")
 
 st.title("LLM Code Generation Benchmark")
-st.write("Compare Aya Expanse and Llama 4 Scout on the same repository-aware coding task, then combine deterministic validation with LLM-based quality judgment.")
+st.write("Compare repository-aware code generation, deterministic validation, isolated execution, and semantic judging across coding models.")
 
 if st.session_state.context:
     with st.expander("Repository context", expanded=False):
@@ -250,20 +325,21 @@ if prompt := st.chat_input("Describe the code change you want..."):
             with st.chat_message("assistant"):
                 aya_code, llama_code = asyncio.run(generate_code(prompt))
             st.session_state.last_generated_code = {"aya_expanse": aya_code, "llama_scout": llama_code}
-            st.session_state.evaluation_results = {"aya_expanse": None, "llama_scout": None}
-            st.session_state.pairwise_result = None
-            st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
+            reset_run_state()
             st.session_state.chat_history.append({"role": "assistant", "content": "", "aya_response": aya_code, "llama_response": llama_code})
         except Exception as exc:
             st.error(f"Code generation failed: {exc}")
 
 st.divider()
-left, right = st.columns(2)
+left, middle, right = st.columns(3)
 with left:
-    if st.button("Run Isolated Checks"):
+    if st.button("Run Isolated Checks", use_container_width=True):
         run_sandbox_checks()
-with right:
-    if st.button("Evaluate Latest Generation"):
+with middle:
+    if st.button("Evaluate Latest", use_container_width=True):
         evaluate_latest()
+with right:
+    if st.button("Run Agent Evaluation", use_container_width=True):
+        run_agent_evaluation()
 
 show_evaluation_results()
