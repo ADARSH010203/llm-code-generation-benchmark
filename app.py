@@ -11,6 +11,8 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from benchmark.agent import inspect_candidate
+from benchmark.agent_loop import run_self_repair
+from benchmark.agent_service import repair_with_model
 from benchmark.evaluation import compare_outputs, evaluate_code
 from benchmark.ingestion import ingest_github_repo
 from benchmark.model_service import get_parallel_responses
@@ -36,6 +38,7 @@ def initialize_state() -> None:
         "pairwise_result": None,
         "execution_results": {"aya_expanse": None, "llama_scout": None},
         "agent_steps": {"aya_expanse": [], "llama_scout": []},
+        "repair_runs": {"aya_expanse": None, "llama_scout": None},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -93,6 +96,7 @@ def reset_run_state() -> None:
     st.session_state.pairwise_result = None
     st.session_state.execution_results = {"aya_expanse": None, "llama_scout": None}
     st.session_state.agent_steps = {"aya_expanse": [], "llama_scout": []}
+    st.session_state.repair_runs = {"aya_expanse": None, "llama_scout": None}
 
 
 def evaluate_latest() -> None:
@@ -133,7 +137,7 @@ def run_sandbox_checks() -> None:
 
 
 def run_agent_evaluation() -> None:
-    """Run the visible agent trajectory: validate -> sandbox -> judge."""
+    """Run validation, isolated execution, and semantic judging."""
     outputs = st.session_state.last_generated_code
     repo_url = st.session_state.get("github_repo", "")
     if not outputs["aya_expanse"] or not outputs["llama_scout"]:
@@ -166,6 +170,73 @@ def run_agent_evaluation() -> None:
             task=st.session_state.latest_task,
             aya_output=outputs["aya_expanse"],
             llama_output=outputs["llama_scout"],
+            reference_code=st.session_state.reference_code or None,
+        )
+
+
+def run_self_repair_loop() -> None:
+    """Run bounded generate -> test -> repair loops for both models."""
+    outputs = st.session_state.last_generated_code
+    repo_url = st.session_state.get("github_repo", "")
+    if not outputs["aya_expanse"] or not outputs["llama_scout"]:
+        st.error("Generate code with both models before starting self-repair.")
+        return
+    if not repo_url:
+        st.error("Enter a GitHub repository URL before starting self-repair.")
+        return
+
+    max_repairs = int(st.session_state.get("max_repair_attempts", 2))
+    with st.spinner(f"Running self-repair loop with up to {max_repairs} repair attempt(s) per model..."):
+        for model_name, output in outputs.items():
+            async def repair_fn(prompt: str, selected_model: str = model_name) -> str:
+                return await repair_with_model(selected_model, prompt)
+
+            run = asyncio.run(
+                run_self_repair(
+                    task=st.session_state.latest_task,
+                    repository_context=_repository_eval_context(),
+                    initial_output=output,
+                    repo_url=repo_url,
+                    repair_fn=repair_fn,
+                    max_attempts=max_repairs,
+                )
+            )
+            st.session_state.repair_runs[model_name] = run
+            st.session_state.last_generated_code[model_name] = run.best_output
+
+            final_execution = run.best_execution
+            final_evaluation = evaluate_code(
+                generated_code=run.best_output,
+                task=st.session_state.latest_task,
+                repository_context=_repository_eval_context(),
+                reference_code=st.session_state.reference_code or None,
+                execution_result=final_execution,
+            )
+            st.session_state.execution_results[model_name] = final_execution
+            st.session_state.evaluation_results[model_name] = final_evaluation
+            st.session_state.agent_steps[model_name] = [
+                {
+                    "name": f"attempt_{attempt.attempt}",
+                    "status": attempt.status,
+                    "details": {
+                        "failure_evidence": attempt.failure_evidence,
+                        "execution": attempt.execution,
+                    },
+                }
+                for attempt in run.attempts
+            ]
+            st.session_state.agent_steps[model_name].append(
+                {
+                    "name": "best_candidate_selected",
+                    "status": "passed" if run.passed else "completed",
+                    "details": {"stopped_reason": run.stopped_reason},
+                }
+            )
+
+        st.session_state.pairwise_result = compare_outputs(
+            task=st.session_state.latest_task,
+            aya_output=st.session_state.last_generated_code["aya_expanse"],
+            llama_output=st.session_state.last_generated_code["llama_scout"],
             reference_code=st.session_state.reference_code or None,
         )
 
@@ -217,13 +288,39 @@ def show_agent_trace() -> None:
     if not any(steps.values()):
         return
     st.subheader("Agent Evaluation Trace")
-    st.caption("Each candidate follows the same observable evaluation path: validation → isolated execution → semantic judge.")
+    st.caption("Each candidate exposes its validation, execution, repair attempts, and final selection evidence.")
     for model_name, model_steps in steps.items():
         st.markdown(f"**{MODEL_LABELS[model_name]}**")
         rows = []
         for step in model_steps:
-            rows.append({"Step": step.name if hasattr(step, "name") else step["name"], "Status": step.status if hasattr(step, "status") else step["status"]})
+            step_name = step.name if hasattr(step, "name") else step["name"]
+            step_status = step.status if hasattr(step, "status") else step["status"]
+            rows.append({"Step": step_name, "Status": step_status})
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        for index, step in enumerate(model_steps):
+            details = step.details if hasattr(step, "details") else step.get("details", {})
+            failure_evidence = details.get("failure_evidence") if isinstance(details, dict) else None
+            if failure_evidence:
+                with st.expander(f"{model_name} failure evidence #{index + 1}"):
+                    st.code(failure_evidence, language="text")
+
+
+def show_repair_summary() -> None:
+    runs = st.session_state.repair_runs
+    if not any(runs.values()):
+        return
+    st.subheader("Self-Repair Summary")
+    for model_name, run in runs.items():
+        if run is None:
+            continue
+        status = "PASS" if run.passed else "BEST-EFFORT"
+        st.write({
+            "Model": MODEL_LABELS[model_name],
+            "Attempts": len(run.attempts),
+            "Result": status,
+            "Stopped reason": run.stopped_reason,
+        })
 
 
 def show_evaluation_results() -> None:
@@ -269,6 +366,7 @@ def show_evaluation_results() -> None:
         status = "PASS" if result.get("passed") else "FAIL"
         st.caption(f"Final status: **{status}** — LLM threshold 0.70 plus deterministic gates.")
 
+    show_repair_summary()
     show_agent_trace()
 
 
@@ -298,11 +396,14 @@ with st.sidebar:
     except Exception as exc:
         st.warning(f"Benchmark tasks unavailable: {exc}")
 
+    st.header("Agent Settings")
+    st.slider("Max repair attempts", min_value=0, max_value=3, value=2, key="max_repair_attempts")
+
     st.header("Evaluation")
     st.text_area("Reference implementation (optional)", height=180, key="reference_code")
 
 st.title("LLM Code Generation Benchmark")
-st.write("Compare repository-aware code generation, deterministic validation, isolated execution, and semantic judging across coding models.")
+st.write("Compare repository-aware code generation, deterministic validation, isolated execution, semantic judging, and bounded self-repair across coding models.")
 
 if st.session_state.context:
     with st.expander("Repository context", expanded=False):
@@ -331,7 +432,7 @@ if prompt := st.chat_input("Describe the code change you want..."):
             st.error(f"Code generation failed: {exc}")
 
 st.divider()
-left, middle, right = st.columns(3)
+left, middle, right, repair = st.columns(4)
 with left:
     if st.button("Run Isolated Checks", use_container_width=True):
         run_sandbox_checks()
@@ -341,5 +442,8 @@ with middle:
 with right:
     if st.button("Run Agent Evaluation", use_container_width=True):
         run_agent_evaluation()
+with repair:
+    if st.button("Self-Repair & Re-test", use_container_width=True):
+        run_self_repair_loop()
 
 show_evaluation_results()
