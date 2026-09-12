@@ -4,46 +4,9 @@
 
 ## What this project does
 
-Given the same existing repository and requested code change, the system compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** under the same context and evaluation policy.
+Given the same existing repository and requested code change, the system compares **Groq GPT-OSS 120B** and the **OpenRouter Free Router** under the same context and evaluation policy.
 
 The project is designed to grow from a model benchmark into a **repository-aware AI coding-agent evaluation platform**.
-
-## Project structure
-
-```text
-.
-├── app.py                         # Streamlit dashboard
-├── benchmark/
-│   ├── agent.py                  # Validation → execution → semantic judging
-│   ├── agent_loop.py             # Bounded self-repair orchestration
-│   ├── agent_service.py          # Repair-model adapter
-│   ├── evaluation.py             # GEval + ArenaGEval scoring
-│   ├── ingestion.py              # GitHub ingestion + credential redaction
-│   ├── model_service.py           # Provider/model calls + streaming
-│   ├── retrieval.py               # Task-aware repository retrieval
-│   ├── sandbox.py                 # Restricted Docker checks
-│   ├── tasks.py                   # Reproducible benchmark task loader
-│   └── validation.py              # Static validation + security checks
-├── data/
-│   └── benchmark_tasks.json       # Starter benchmark tasks
-├── docs/
-│   ├── BENCHMARK.md               # Benchmark protocol
-│   └── SELF_REPAIR.md             # Self-repair design and safety boundaries
-├── scripts/
-│   └── validate_benchmark.py      # Task-set validation CLI
-├── evals/                         # Future benchmark result artifacts
-├── tests/                         # Deterministic unit tests
-├── artifacts/                     # Local/generated artifacts
-├── .github/workflows/ci.yml       # Compile + task validation + tests
-├── .env.example
-├── .gitignore
-├── .python-version
-├── LICENSE
-├── pyproject.toml
-└── requirements.txt
-```
-
-The older root-level implementation modules remain only as thin compatibility shims. The canonical source is the `benchmark/` package.
 
 ## Evaluation workflow
 
@@ -54,11 +17,11 @@ GitHub Repository
       ↓
  Task-aware Retrieval
       ↓
- ┌───────────────┐
- ↓               ↓
-Aya Expanse   Llama 4 Scout
- ↓               ↓
- └───────┬───────┘
+ ┌────────────────┐
+ ↓                ↓
+Groq          OpenRouter
+ ↓                ↓
+ └───────┬────────┘
          ↓
  Single / Multi-file Candidate
          ↓
@@ -70,7 +33,7 @@ Aya Expanse   Llama 4 Scout
          ↓
  ArenaGEval Pairwise Judge
          ↓
- Optional Self-Repair Loop
+ Self-Repair & Re-test
          ↓
  Best Candidate + Agent Trace
          ↓
@@ -80,49 +43,19 @@ Aya Expanse   Llama 4 Scout
 ## Current capabilities
 
 ### Repository-aware generation
-
-The prompt builder uses the repository summary, structure, and task-ranked file retrieval instead of dumping the entire repository into every request. Retrieved context is bounded and repository instructions are treated as untrusted data.
+The prompt builder uses repository summary, structure, and task-ranked file retrieval instead of dumping the entire repository into every request. Retrieved context is bounded and repository instructions are treated as untrusted data.
 
 ### Multi-file code generation
-
-Models can return coordinated changes using:
-
-```text
-FILE: path/to/file.py
-```python
-# complete file contents
-```
-```
-
-The validator parses multiple files, counts the generated workspace, and applies path-traversal protection before sandboxing.
+Models can return coordinated changes using `FILE: path` fenced blocks. The validator parses multiple files, counts the generated workspace, and applies path-traversal protection before sandboxing.
 
 ### Deterministic validation
-
-The benchmark currently checks Python syntax/compilation, lightweight HTML parsing, obvious credential patterns, output structure, file/line counts, and other static evidence before relying on LLM judgment.
+The benchmark checks Python syntax/compilation, lightweight HTML parsing, obvious credential patterns, output structure, file/line counts, and other static evidence before relying on LLM judgment.
 
 ### Isolated execution
+Generated workspaces can be checked through Docker with no network access, dropped capabilities, a read-only root filesystem, resource limits, and a temporary workspace. Arbitrary dependency installation and arbitrary host execution are not enabled.
 
-Generated workspaces can be checked through Docker with no network access, dropped Linux capabilities, read-only root filesystem, resource limits, and a temporary workspace. The system intentionally avoids installing arbitrary dependencies or executing arbitrary repository scripts.
-
-### Agent-style evaluation
-
-`benchmark/agent.py` provides a reusable trajectory:
-
-```text
-Candidate
-  ↓
-Validation
-  ↓
-Isolated execution
-  ↓
-Semantic evaluation
-  ↓
-Observable trace
-```
-
-### Bounded self-repair
-
-`benchmark/agent_loop.py` adds a real model-driven recovery loop:
+### Self-repair agent
+The bounded agent loop follows:
 
 ```text
 Generate
@@ -140,16 +73,44 @@ Re-test
 Best candidate
 ```
 
-The Streamlit dashboard exposes a **Self-Repair & Re-test** action and a configurable repair budget. Each repair attempt receives the original task, bounded repository context, current candidate, and compact deterministic failure evidence. The final candidate is selected using deterministic evidence rather than asking the model to grade itself.
+Repair attempts are explicitly limited. The final candidate is ranked using deterministic evidence instead of asking the model to grade itself.
 
 ### Reproducible benchmark suite
-
-Tasks are stored in `data/benchmark_tasks.json` and loaded through `benchmark/tasks.py`. Each task has a stable ID, category, language, and task description.
-
-Validate the task suite locally with:
+Tasks live in `data/benchmark_tasks.json` and are loaded through `benchmark/tasks.py`. Validate them locally with:
 
 ```bash
 python scripts/validate_benchmark.py
+```
+
+## Project structure
+
+```text
+.
+├── app.py
+├── benchmark/
+│   ├── agent.py
+│   ├── agent_loop.py
+│   ├── agent_service.py
+│   ├── evaluation.py
+│   ├── ingestion.py
+│   ├── model_service.py
+│   ├── retrieval.py
+│   ├── sandbox.py
+│   ├── tasks.py
+│   └── validation.py
+├── data/benchmark_tasks.json
+├── docs/BENCHMARK.md
+├── docs/SELF_REPAIR.md
+├── scripts/validate_benchmark.py
+├── tests/
+├── artifacts/
+├── .github/workflows/ci.yml
+├── .env.example
+├── .gitignore
+├── .python-version
+├── LICENSE
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ## Metrics
@@ -161,30 +122,23 @@ python scripts/validate_benchmark.py
 | Best Practices | Error handling, security, efficiency, modularity |
 | Validation | Deterministic syntax/security evidence |
 | Sandbox | Isolated execution result when available |
-| Repair recovery | Whether a failed candidate can be improved within the bounded budget |
+| Repair recovery | Whether a failed candidate improves within the bounded budget |
 | Pairwise winner | Direct blinded comparison between model candidates |
 
-DeepEval scores remain in their native `0–1` range internally and are displayed as `0–10` in the UI. The current semantic threshold is `0.70`.
+DeepEval scores remain in native `0–1` internally and are displayed as `0–10`. Current semantic threshold: `0.70`.
 
-## Roadmap
+## Configuration
 
-The foundation is now ready for the next evaluation layer:
+Required keys:
 
-1. **Dependency-aware retrieval** — include imports, callers, tests, and related configuration instead of only lexical matches.
-2. **Language-specific execution** — stronger JavaScript/TypeScript/Python test and build discovery with explicit allow-lists.
-3. **Browser smoke tests** — evaluate generated websites through a separately isolated browser runner.
-4. **Benchmark statistics** — run multiple trials and report pass rate, mean/median score, pairwise win rate, failure categories, latency, and cost.
-5. **Result export** — save benchmark runs as JSON/CSV for reproducible comparisons.
-6. **CI regression benchmarks** — run a small stable benchmark subset on pull requests to detect quality regressions.
-7. **Patch/PR mode** — turn a validated best candidate into a reviewable patch instead of directly modifying a repository.
+```env
+GROQ_API_KEY=
+OPENROUTER_API_KEY=
+```
 
-## Security model
+DeepEval can also use OpenRouter for its LLM-as-a-judge metrics via `USE_OPENROUTER_MODEL=1` and `DEEPEVAL_MODEL=openrouter/free`.
 
-Repository content and model output are untrusted. Credentials are expected to stay in environment variables, ingestion performs obvious secret redaction, generated paths are restricted to the sandbox workspace, and arbitrary generated code is not executed in the main Streamlit process.
-
-Self-repair is bounded by an explicit attempt budget. Empty repair responses stop the loop, and candidate ranking uses deterministic evidence. Docker checks remain network-isolated with resource limits.
-
-Previously exposed credentials were revoked/rotated and removed from the current branch. Historical Git objects may still require a separate history rewrite if complete secret removal is needed.
+OpenRouter currently provides a free router that selects among available free models; Groq currently provides GPT-OSS models through its API. Availability and rate limits can change. citeturn912851search1turn912851search5
 
 ## Setup
 
@@ -197,7 +151,7 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and add credentials locally. Never commit real API keys.
 
-Run the dashboard:
+Run:
 
 ```bash
 streamlit run app.py
@@ -207,18 +161,29 @@ streamlit run app.py
 
 1. Enter a public GitHub repository URL.
 2. Click **Ingest Repository**.
-3. Select a reproducible benchmark task or enter a custom coding task.
-4. Generate the same task with both models.
-5. Review retrieval evidence and multi-file output.
-6. Run **Evaluate Latest** for static + semantic scoring.
+3. Select a reproducible task or enter a custom coding task.
+4. Generate the same task with both providers.
+5. Review retrieval evidence and generated files.
+6. Run **Evaluate Latest**.
 7. Run **Run Isolated Checks** when Docker is available.
-8. Run **Run Agent Evaluation** for the validation → sandbox → judge trace.
-9. Set the repair budget and run **Self-Repair & Re-test** to let each model attempt bounded recovery from concrete failures.
-10. Review repair attempts, failure evidence, final candidate, scores, sandbox output, and pairwise winner.
+8. Run **Self-Repair & Re-test** to give each candidate a bounded repair budget.
+9. Review repair attempts, failure evidence, final candidate, scores, sandbox output, and pairwise winner.
 
-## Technology
+## Roadmap
 
-Python 3.12+, Streamlit, LiteLLM, GitIngest, DeepEval, Pandas, Plotly, Docker (optional), Cohere Aya Expanse, and Meta Llama 4 Scout.
+1. Dependency-aware retrieval
+2. Stronger language-specific execution
+3. Browser smoke tests for generated websites
+4. Multi-trial benchmark statistics
+5. JSON/CSV result export
+6. CI benchmark regression suite
+7. Patch/PR generation mode
+
+## Security
+
+Repository content and model output are untrusted. Credentials stay in environment variables, ingestion performs obvious secret redaction, generated paths are restricted, and generated code is not executed in the main Streamlit process. Self-repair is bounded by an explicit attempt budget and Docker checks remain network-isolated.
+
+Previously exposed credentials were revoked/rotated and removed from the current branch. Historical Git objects may still require a separate history rewrite if complete secret removal is needed.
 
 ## License
 

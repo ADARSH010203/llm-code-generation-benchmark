@@ -7,8 +7,10 @@ from code_ingestion import ingest_github_repo
 
 
 def test_model_configuration_is_explicit() -> None:
-    assert MODEL_CONFIG["aya_expanse"]["model"].startswith("c4ai-")
-    assert MODEL_CONFIG["llama_scout"]["model"].startswith("llama-")
+    assert MODEL_CONFIG["aya_expanse"]["model"] == "groq/openai/gpt-oss-120b"
+    assert MODEL_CONFIG["aya_expanse"]["api_key_env"] == "GROQ_API_KEY"
+    assert MODEL_CONFIG["llama_scout"]["model"] == "openrouter/openrouter/free"
+    assert MODEL_CONFIG["llama_scout"]["api_key_env"] == "OPENROUTER_API_KEY"
 
 
 def test_ingestion_rejects_empty_url() -> None:

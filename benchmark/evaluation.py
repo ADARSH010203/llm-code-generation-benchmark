@@ -167,8 +167,8 @@ def compare_outputs(
         expected_output = reference_code
         contestants = [
             Contestant(
-                name="Aya Expanse",
-                hyperparameters={"model": "c4ai-aya-expanse-32b"},
+                name="Groq GPT-OSS 120B",
+                hyperparameters={"model": "groq/openai/gpt-oss-120b"},
                 test_case=LLMTestCase(
                     input=task,
                     actual_output=aya_output,
@@ -176,8 +176,8 @@ def compare_outputs(
                 ),
             ),
             Contestant(
-                name="Llama 4 Scout",
-                hyperparameters={"model": "llama-4-scout-17b-16e-instruct"},
+                name="OpenRouter Free Router",
+                hyperparameters={"model": "openrouter/openrouter/free"},
                 test_case=LLMTestCase(
                     input=task,
                     actual_output=llama_output,
