@@ -1,28 +1,37 @@
 # LLM Code Generation Benchmark
 
-> A repository-aware benchmark that compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** on the same coding task, then combines deterministic validation with **DeepEval** judging.
+> A repository-aware benchmark for evaluating AI coding models on the same software-engineering task, combining retrieval, deterministic checks, isolated execution, and DeepEval judging.
+
+## What this project does
+
+Given the same existing repository and requested code change, the system compares **Cohere Aya Expanse** and **Meta Llama 4 Scout** under the same context and evaluation policy.
+
+The project is designed to grow from a model benchmark into a **repository-aware AI coding-agent evaluation platform**.
 
 ## Project structure
 
 ```text
 .
 ├── app.py                         # Streamlit entry point
-├── benchmark/                     # Canonical benchmark implementation
-│   ├── __init__.py
-│   ├── evaluation.py              # GEval + ArenaGEval scoring
-│   ├── ingestion.py               # GitHub ingestion + redaction
+├── benchmark/
+│   ├── agent.py                  # Agent-style validation → execution → judging flow
+│   ├── evaluation.py             # GEval + ArenaGEval scoring
+│   ├── ingestion.py              # GitHub ingestion + credential redaction
 │   ├── model_service.py           # Provider/model calls + streaming
 │   ├── retrieval.py               # Task-aware repository retrieval
-│   ├── sandbox.py                 # Optional isolated checks
+│   ├── sandbox.py                 # Restricted Docker checks
+│   ├── tasks.py                   # Reproducible benchmark task loader
 │   └── validation.py              # Static validation + security checks
 ├── data/
 │   └── benchmark_tasks.json       # Starter benchmark tasks
 ├── docs/
-│   └── BENCHMARK.md               # Benchmark protocol
-├── evals/
-├── tests/
-├── artifacts/
-├── .github/workflows/ci.yml
+│   └── BENCHMARK.md               # Benchmark protocol and limitations
+├── scripts/
+│   └── validate_benchmark.py      # Task-set validation CLI
+├── evals/                         # Space for future benchmark result artifacts
+├── tests/                         # Deterministic unit tests
+├── artifacts/                     # Local/generated artifacts, not source data
+├── .github/workflows/ci.yml       # Compile + task validation + tests
 ├── .env.example
 ├── .gitignore
 ├── .python-version
@@ -31,26 +40,16 @@
 └── requirements.txt
 ```
 
-The former root-level implementation modules are now thin compatibility shims. The source of truth is the `benchmark/` package.
+The older root-level implementation modules remain only as thin compatibility shims. The canonical source is the `benchmark/` package.
 
-## What this project is
-
-This is an experiment framework for a practical software-engineering question:
-
-**Given the same existing codebase and the same requested change, which model produces the stronger implementation?**
-
-The same repository/task inputs go to Aya Expanse and Llama 4 Scout. Their outputs are streamed in parallel, checked, scored, and compared head-to-head.
-
-## Workflow
+## Evaluation workflow
 
 ```text
 GitHub Repository
       ↓
-   GitIngest
+   GitIngest + Redaction
       ↓
- Sanitized Repository Context
-      ↓
- Task-aware File Retrieval
+ Task-aware Retrieval
       ↓
  ┌───────────────┐
  ↓               ↓
@@ -58,67 +57,104 @@ Aya Expanse   Llama 4 Scout
  ↓               ↓
  └───────┬───────┘
          ↓
- Single / Multi-file Output
+ Single / Multi-file Candidate
          ↓
- ┌───────────────┐
- ↓               ↓
-Static Checks   DeepEval
- ↓               ↓
- └───────┬───────┘
+ Candidate Validation
+         ↓
+ Restricted Docker Sandbox
+         ↓
+ DeepEval Quality Metrics
          ↓
  ArenaGEval Pairwise Judge
          ↓
- Optional Docker Checks
-         ↓
- Streamlit Dashboard
+ Agent Evaluation Trace + Dashboard
 ```
 
-## Evaluation
+## Current capabilities
 
-### Deterministic evidence
+### Repository-aware generation
 
-- Python syntax/compile checks where applicable
-- Basic HTML parsing
-- Multi-file output parsing
-- Obvious credential-pattern scanning
-- File and line counts
-- Optional restricted Docker checks
+The prompt builder uses the repository summary, structure, and task-ranked file retrieval instead of dumping the entire repository into every request. Retrieved context is bounded and repository instructions are treated as untrusted data.
 
-### DeepEval judging
+### Multi-file code generation
+
+Models can return coordinated changes using:
+
+```text
+FILE: path/to/file.py
+```python
+# complete file contents
+```
+```
+
+The validator parses multiple files, counts the generated workspace, and applies path-traversal protection before sandboxing.
+
+### Deterministic validation
+
+The benchmark currently checks Python syntax/compilation, lightweight HTML parsing, obvious credential patterns, output structure, file/line counts, and other static evidence before relying on LLM judgment.
+
+### Isolated execution
+
+Generated workspaces can be checked through Docker with no network access, dropped Linux capabilities, read-only root filesystem, resource limits, and a temporary workspace. The system intentionally avoids installing arbitrary dependencies or executing arbitrary repository scripts.
+
+### Agent-style evaluation
+
+`benchmark/agent.py` provides a reusable evaluation trajectory:
+
+```text
+Candidate
+  ↓
+Validation
+  ↓
+Isolated execution
+  ↓
+Semantic evaluation
+  ↓
+Pass / fail + observable trace
+```
+
+It also produces a bounded repair prompt from observed failures, which is the foundation for future multi-step coding-agent loops.
+
+### Reproducible benchmark suite
+
+Tasks are stored in `data/benchmark_tasks.json` and loaded through `benchmark/tasks.py`. Each task has a stable ID, category, language, and task description.
+
+Validate the task suite locally with:
+
+```bash
+python scripts/validate_benchmark.py
+```
+
+## Metrics
 
 | Metric | Purpose |
 |---|---|
-| Correctness | Task compliance, expected behavior, edge cases, runtime risks, repository fit |
-| Readability | Naming, organization, formatting, documentation, maintainability |
-| Best Practices | Error handling, security, efficiency, modularity, configuration hygiene |
+| Correctness | Task compliance, intended behavior, edge cases, repository fit |
+| Readability | Naming, structure, formatting, documentation, maintainability |
+| Best Practices | Error handling, security, efficiency, modularity |
+| Validation | Deterministic syntax/security evidence |
+| Sandbox | Isolated execution result when available |
+| Pairwise winner | Direct blinded comparison between model candidates |
 
-DeepEval scores stay in their native `0–1` range internally and are displayed on a `0–10` scale. Current threshold: `0.70`.
+DeepEval scores remain in their native `0–1` range internally and are displayed as `0–10` in the UI. The current semantic threshold is `0.70`.
 
-### Pairwise comparison
+## What comes next
 
-ArenaGEval is used separately for the direct question: **which candidate is better?** Its result is not merged into the individual numerical score.
+The architecture now has the foundation for a stronger coding-agent benchmark. The next upgrades are:
 
-## Large repository / website behavior
+1. **Repair loop** — after validation/sandbox failure, send the bounded failure evidence back to the model for a limited repair attempt.
+2. **Dependency-aware retrieval** — include imports, callers, tests, and related configuration instead of only lexical matches.
+3. **Language-specific execution** — stronger JavaScript/TypeScript/Python test and build detection with explicit allow-lists.
+4. **Browser smoke tests** — evaluate generated websites through a separately isolated browser runner.
+5. **Benchmark statistics** — run multiple trials and report pass rate, mean/median score, pairwise win rate, failure categories, latency, and cost.
+6. **Result export** — save benchmark runs as JSON/CSV for reproducible comparisons.
+7. **CI regression benchmarks** — run a small stable benchmark subset on pull requests to detect quality regressions.
 
-A small function and a complete website are different evaluation problems. Large repositories can overwhelm a single prompt, so task-aware retrieval selects candidate files and sends a bounded context.
+## Security model
 
-For multi-file work, models return a structured `FILE:` format and the validator checks the detected files.
+Repository content and model output are untrusted. Credentials are expected to stay in environment variables, ingestion performs obvious secret redaction, generated paths are restricted to the sandbox workspace, and arbitrary generated code is not executed in the main Streamlit process.
 
-For a full website, reliable evaluation requires applying the generated change to a repository snapshot, running tests/builds in isolation, and eventually performing browser smoke tests. The current Docker layer is deliberately conservative and does not install arbitrary dependencies or execute arbitrary repository scripts by default.
-
-## Security
-
-Repository content and model output are treated as untrusted. The ingestion layer redacts obvious credentials, prompts treat repository comments/documentation as data rather than instructions, generated paths are checked for traversal, and provider credentials stay outside source code.
-
-Previously exposed credentials were revoked/rotated and removed from the current branch. Old Git objects may still contain historical material until the history is rewritten.
-
-## Benchmark protocol
-
-See [`docs/BENCHMARK.md`](docs/BENCHMARK.md) for the evaluation ladder, threat model, scoring guidance, reproducibility requirements, and limitations.
-
-Starter tasks are in [`data/benchmark_tasks.json`](data/benchmark_tasks.json).
-
-For meaningful comparisons, use multiple tasks and multiple trials and report quality mean/median, pass rate, pairwise win rate, failure rate, latency, and token/cost data when available.
+Previously exposed credentials were revoked/rotated and removed from the current branch. Historical Git objects may still require a separate history rewrite if complete secret removal is needed.
 
 ## Setup
 
@@ -129,9 +165,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and configure credentials locally. Never commit real keys.
+Copy `.env.example` to `.env` and add credentials locally. Never commit real API keys.
 
-Run:
+Run the dashboard:
 
 ```bash
 streamlit run app.py
@@ -141,28 +177,17 @@ streamlit run app.py
 
 1. Enter a public GitHub repository URL.
 2. Click **Ingest Repository**.
-3. Describe one concrete coding change.
-4. Compare Aya Expanse and Llama 4 Scout outputs.
-5. Review task-ranked retrieval evidence.
-6. Optionally provide reference code.
-7. Run **Evaluate Latest Generation**.
-8. For multi-file output, run **Run Isolated Checks** when Docker is available.
-9. Review scores, validation evidence, sandbox results, and pairwise winner.
+3. Select a reproducible benchmark task or enter a custom coding task.
+4. Generate the same task with both models.
+5. Review retrieval evidence and multi-file output.
+6. Run **Evaluate Latest** for static + semantic scoring.
+7. Run **Run Isolated Checks** when Docker is available.
+8. Run **Run Agent Evaluation** for the full validation → sandbox → judge trace.
+9. Review scores, deterministic evidence, sandbox output, and pairwise winner.
 
 ## Technology
 
 Python 3.12+, Streamlit, LiteLLM, GitIngest, DeepEval, Pandas, Plotly, Docker (optional), Cohere Aya Expanse, and Meta Llama 4 Scout.
-
-## Roadmap
-
-- Semantic + dependency-aware retrieval
-- Stronger JavaScript/TypeScript/CSS validation
-- Safe test/build discovery
-- Browser-level smoke testing
-- Latency/token/cost telemetry
-- Multi-trial statistical benchmark reports
-- JSON/CSV result export
-- CI benchmark regression suite
 
 ## License
 
