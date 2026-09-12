@@ -13,7 +13,7 @@ from deepeval.metrics import ArenaGEval, GEval
 from deepeval.metrics.g_eval import Rubric
 from deepeval.test_case import ArenaTestCase, Contestant, LLMTestCase, SingleTurnParams
 
-from code_validation import validate_generated_output
+from .validation import validate_generated_output
 
 LLM_SCORE_THRESHOLD = 0.70
 DISPLAY_SCALE = 10.0
@@ -29,7 +29,6 @@ def _metric(
         "name": name,
         "evaluation_steps": steps,
         "evaluation_params": evaluation_params,
-        # GEval returns a normalized 0-1 score even when a rubric is supplied.
         "rubric": [
             Rubric(score_range=(0.0, 0.2), expected_outcome="Poor; major problems make the implementation unsuitable."),
             Rubric(score_range=(0.3, 0.5), expected_outcome="Partially acceptable; important problems remain."),
@@ -89,7 +88,6 @@ def evaluate_code(
             correctness_params.append(SingleTurnParams.EXPECTED_OUTPUT)
 
         test_case = LLMTestCase(**kwargs)
-
         correctness = _metric(
             "Code Correctness",
             [
