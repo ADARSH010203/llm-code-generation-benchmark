@@ -8,7 +8,7 @@ from typing import Any
 
 from litellm import acompletion
 
-from context_retrieval import build_retrieved_context
+from .retrieval import build_retrieved_context
 
 MODEL_CONFIG = {
     "aya_expanse": {
