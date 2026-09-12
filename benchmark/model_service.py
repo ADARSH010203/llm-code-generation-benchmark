@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from litellm import acompletion
 from .retrieval import build_retrieved_context
+
 MODEL_CONFIG = {
     "qwen": {"label": "Qwen 3.6 27B", "model": "groq/qwen/qwen3.6-27b", "api_key_env": "GROQ_API_KEY", "provider": "Groq"},
     "nemotron": {"label": "NVIDIA Nemotron 3 Super 120B", "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "api_key_env": "OPENROUTER_API_KEY", "provider": "OpenRouter"},
@@ -12,6 +13,7 @@ MODEL_CONFIG = {
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "6000"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT", "90"))
 RETRIES = int(os.getenv("LLM_RETRIES", "2"))
+
 def _build_prompt(prompt: str, context: dict[str, Any]) -> str:
     retrieved = build_retrieved_context(context.get("content", ""), prompt)
     return f"""You are making a code change in an existing software repository.
@@ -46,20 +48,35 @@ file contents
 ```
 Do not add prose outside the code blocks.
 """
+
 def _api_key_for(model_name: str) -> str:
     config = MODEL_CONFIG.get(model_name)
-    if not config: raise ValueError(f"Unsupported model: {model_name}")
+    if not config:
+        raise ValueError(f"Unsupported model: {model_name}")
     key = os.getenv(config["api_key_env"])
-    if not key: raise RuntimeError(f"Missing {config['api_key_env']}. Add it to the local environment.")
+    if not key:
+        raise RuntimeError(f"Missing {config['api_key_env']}. Add it to the local environment.")
     return key
+
 async def stream_model_response(model_name: str, prompt: str, context: dict[str, Any]) -> AsyncIterator[str]:
     config = MODEL_CONFIG.get(model_name)
-    if not config: raise ValueError(f"Unsupported model: {model_name}")
-    response = await acompletion(model=config["model"], messages=[{"role": "user", "content": _build_prompt(prompt, context)}], api_key=_api_key_for(model_name), max_tokens=MAX_OUTPUT_TOKENS, stream=True, timeout=REQUEST_TIMEOUT_SECONDS, num_retries=RETRIES)
+    if not config:
+        raise ValueError(f"Unsupported model: {model_name}")
+    response = await acompletion(
+        model=config["model"],
+        messages=[{"role": "user", "content": _build_prompt(prompt, context)}],
+        api_key=_api_key_for(model_name),
+        max_tokens=MAX_OUTPUT_TOKENS,
+        stream=True,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        num_retries=RETRIES,
+    )
     async for chunk in response:
         choices = getattr(chunk, "choices", None) or []
         if choices:
             content = getattr(choices[0].delta, "content", None)
-            if content: yield content
+            if content:
+                yield content
+
 async def get_parallel_responses(prompt: str, context: dict[str, Any]) -> tuple[AsyncIterator[str], AsyncIterator[str]]:
     return (stream_model_response("qwen", prompt, context), stream_model_response("nemotron", prompt, context))
