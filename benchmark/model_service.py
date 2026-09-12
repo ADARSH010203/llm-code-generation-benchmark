@@ -11,15 +11,15 @@ from litellm import acompletion
 from .retrieval import build_retrieved_context
 
 MODEL_CONFIG = {
-    "aya_expanse": {
-        "label": "Cohere Aya Expanse",
-        "model": "c4ai-aya-expanse-32b",
-        "api_key_env": "COHERE_API_KEY",
+    "groq": {
+        "label": "Groq GPT-OSS 120B",
+        "model": "groq/openai/gpt-oss-120b",
+        "api_key_env": "GROQ_API_KEY",
     },
-    "llama_scout": {
-        "label": "Meta Llama 4 Scout",
-        "model": "llama-4-scout-17b-16e-instruct",
-        "api_key_env": "CEREBRAS_API_KEY",
+    "openrouter": {
+        "label": "OpenRouter Free Router",
+        "model": "openrouter/openrouter/free",
+        "api_key_env": "OPENROUTER_API_KEY",
     },
 }
 
@@ -124,8 +124,8 @@ async def get_parallel_responses(
     prompt: str,
     context: dict[str, Any],
 ) -> tuple[AsyncIterator[str], AsyncIterator[str]]:
-    """Create independent streams so both models receive the same task."""
+    """Create independent streams so both providers receive the same task."""
     return (
-        stream_model_response("llama_scout", prompt, context),
-        stream_model_response("aya_expanse", prompt, context),
+        stream_model_response("groq", prompt, context),
+        stream_model_response("openrouter", prompt, context),
     )
