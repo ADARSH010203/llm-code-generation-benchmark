@@ -6,12 +6,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 from litellm import acompletion
 from .retrieval import build_retrieved_context
-
 MODEL_CONFIG = {
-    "qwen": {"label": "Qwen 3.6 27B", "model": "groq/qwen/qwen3.6-27b", "api_key_env": "GROQ_API_KEY", "provider": "Groq"},
+    "qwen": {"label": "openai/gpt-oss-20b", "model": "openai/gpt-oss-20b", "api_key_env": "GROQ_API_KEY", "provider": "Groq"},
     "nemotron": {"label": "NVIDIA Nemotron 3 Super 120B", "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "api_key_env": "OPENROUTER_API_KEY", "provider": "OpenRouter"},
 }
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "6000"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1000"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT", "90"))
 RETRIES = int(os.getenv("LLM_RETRIES", "2"))
 
