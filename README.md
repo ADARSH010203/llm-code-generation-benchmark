@@ -150,7 +150,7 @@ Re-test
 Best candidate
 ```
 
-The Streamlit dashboard exposes a **Self-Repair & Re-test** action and a configurable repair budget. Each repair attempt receives the original task, bounded repository context, current candidate, and compact deterministic failure evidence. The final candidate is selected using deterministic evidence rather than asking the model to grade itself.
+The browser dashboard exposes a **Self-Repair & Re-test** action and a configurable repair budget. Each repair attempt receives the original task, bounded repository context, current candidate, and compact deterministic failure evidence. The final candidate is selected using deterministic evidence rather than asking the model to grade itself.
 
 ### Reproducible benchmark suite
 
@@ -190,7 +190,7 @@ The foundation is now ready for the next evaluation layer:
 
 ## Security model
 
-Repository content and model output are untrusted. Credentials are expected to stay in environment variables, ingestion performs obvious secret redaction, generated paths are restricted to the sandbox workspace, and arbitrary generated code is not executed in the main Streamlit process.
+Repository content and model output are untrusted. Credentials are expected to stay in environment variables, ingestion performs obvious secret redaction, generated paths are restricted to the sandbox workspace, and arbitrary generated code is not executed in the main web process.
 
 Self-repair is bounded by an explicit attempt budget. Empty repair responses stop the loop, and candidate ranking uses deterministic evidence. Docker checks remain network-isolated with resource limits.
 
@@ -207,10 +207,10 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and add credentials locally. Never commit real API keys.
 
-Run the dashboard:
+Run the browser dashboard:
 
 ```bash
-streamlit run app.py
+uvicorn server:app --reload
 ```
 
 ## Usage
@@ -228,7 +228,7 @@ streamlit run app.py
 
 ## Technology
 
-Python 3.12+, Streamlit, LiteLLM, GitIngest, DeepEval, Pandas, Plotly, Docker (optional), Groq Qwen 3.6 27B, and OpenRouter NVIDIA Nemotron 3 Super 120B A12B.
+Python 3.12+, FastAPI, Uvicorn, LiteLLM, GitIngest, DeepEval, Pandas, Plotly, Docker (optional), Groq Qwen 3.6 27B, and OpenRouter NVIDIA Nemotron 3 Super 120B A12B.
 
 ## License
 
