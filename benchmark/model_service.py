@@ -1,5 +1,6 @@
 """Model access and repository-aware streaming for the benchmark."""
 from __future__ import annotations
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -62,21 +63,64 @@ async def stream_model_response(model_name: str, prompt: str, context: dict[str,
     config = MODEL_CONFIG.get(model_name)
     if not config:
         raise ValueError(f"Unsupported model: {model_name}")
-    response = await acompletion(
-        model=config["model"],
-        messages=[{"role": "user", "content": _build_prompt(prompt, context)}],
-        api_key=_api_key_for(model_name),
-        max_tokens=MAX_OUTPUT_TOKENS,
-        stream=True,
-        timeout=REQUEST_TIMEOUT_SECONDS,
-        num_retries=RETRIES,
-    )
-    async for chunk in response:
-        choices = getattr(chunk, "choices", None) or []
-        if choices:
-            content = getattr(choices[0].delta, "content", None)
-            if content:
-                yield content
+
+    def is_recoverable(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        detail = " ".join(
+            str(value)
+            for value in (exc, getattr(exc, "error_type", ""), getattr(exc, "message", ""))
+            if value
+        ).lower()
+        permanent_markers = (
+            "authentication",
+            "invalid api key",
+            "invalid_api_key",
+            "invalid model",
+            "model_not_found",
+            "unauthorized",
+            "forbidden",
+            "401",
+            "403",
+        )
+        temporary_markers = (
+            "provider_unavailable",
+            "temporarily overloaded",
+            "service temporarily overloaded",
+            "rate limit",
+            "rate_limit",
+            "429",
+            "503",
+            "timeout",
+            "timed out",
+        )
+        return not any(marker in detail for marker in permanent_markers) and (
+            status_code in {429, 503} or any(marker in detail for marker in temporary_markers)
+        )
+
+    for attempt in range(3):
+        emitted_content = False
+        try:
+            response = await acompletion(
+                model=config["model"],
+                messages=[{"role": "user", "content": _build_prompt(prompt, context)}],
+                api_key=_api_key_for(model_name),
+                max_tokens=1000,
+                stream=True,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                num_retries=0,
+            )
+            async for chunk in response:
+                choices = getattr(chunk, "choices", None) or []
+                if choices:
+                    content = getattr(choices[0].delta, "content", None)
+                    if content:
+                        emitted_content = True
+                        yield content
+            return
+        except Exception as exc:
+            if emitted_content or not is_recoverable(exc) or attempt == 2:
+                raise
+            await asyncio.sleep(2 ** (attempt + 1))
 
 async def get_parallel_responses(prompt: str, context: dict[str, Any]) -> tuple[AsyncIterator[str], AsyncIterator[str]]:
     return (stream_model_response("qwen", prompt, context), stream_model_response("nemotron", prompt, context))
